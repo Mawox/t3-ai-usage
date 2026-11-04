@@ -1,0 +1,8 @@
+#!/bin/sh
+# Stands in for T3's `t3` command in test runs: `t3 auth session issue ... --json`
+# prints the token that tests/mock-t3.js accepts.
+case "$*" in
+  "auth session issue "*)
+    printf '{"sessionId":"demo","token":"local-demo-token","expiresAt":"%s"}\n' "$(date -u -d '+180 days' +%Y-%m-%dT%H:%M:%SZ)" ;;
+  *) echo "fake t3: unsupported: $*" >&2; exit 2 ;;
+esac

@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.t3-ai-usage" path="/org/gnome/shell/extensions/t3-ai-usage/">
+    <key name="local-server" type="b">
+      <default>true</default>
+      <summary>Read T3 Code on this computer</summary>
+    </key>
+    <key name="servers" type="s">
+      <default>'[]'</default>
+      <summary>Other T3 servers (JSON array of id, name and url); their tokens are in ~/.config/t3-ai-usage/tokens</summary>
+    </key>
+    <key name="account-order" type="as">
+      <default>[]</default>
+      <summary>Account order in the menu and the top bar (account keys)</summary>
+    </key>
+    <key name="panel-accounts" type="as">
+      <default>[]</default>
+      <summary>Accounts shown in the top bar (account keys)</summary>
+    </key>
+    <key name="labels" type="a{ss}">
+      <default>{}</default>
+      <summary>Short top-bar labels by account key; missing keys use the default</summary>
+    </key>
+    <key name="hidden-windows" type="as">
+      <default>[]</default>
+      <summary>Limit windows hidden from the top bar and the menu ("account key|window id")</summary>
+    </key>
+    <key name="show-label" type="b">
+      <default>true</default>
+      <summary>Show the account label before the ring</summary>
+    </key>
+    <key name="show-percent" type="b">
+      <default>false</default>
+      <summary>Show the percentage left of the fullest window</summary>
+    </key>
+    <key name="reset-mode" type="s">
+      <choices>
+        <choice value="always"/>
+        <choice value="near-limit"/>
+        <choice value="never"/>
+      </choices>
+      <default>'always'</default>
+      <summary>When to show the time until the fullest window resets</summary>
+    </key>
+    <key name="round-times" type="b">
+      <default>true</default>
+      <summary>Round times to their largest unit (16h instead of 15h59m)</summary>
+    </key>
+    <key name="known-accounts" type="s">
+      <default>'[]'</default>
+      <summary>Accounts seen in the last 30 days (JSON, written by the extension for the preferences)</summary>
+    </key>
+  </schema>
+</schemalist>

@@ -1,0 +1,29 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx eslint .
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gjs gir1.2-soup-3.0 libglib2.0-bin zip
+      - run: gjs -m tests/model.test.js
+      - run: gjs -m tests/t3client.test.js
+      - name: Check that the tag matches version-name
+        run: test "v$(sed -n 's/^ *"version-name": "\(.*\)"$/\1/p' metadata.json)" = "$GITHUB_REF_NAME"
+      - run: scripts/pack.sh
+      - run: gh release create "$GITHUB_REF_NAME" dist/*.zip --title "$GITHUB_REF_NAME" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

@@ -1,0 +1,6 @@
+{
+  "uuid": "unsafe-helper@t3-ai-usage.test",
+  "name": "Test helper",
+  "description": "Test runs only: lets tests/headless.sh evaluate code and take screenshots over D-Bus.",
+  "shell-version": ["46", "47", "48", "49", "50", "51"]
+}

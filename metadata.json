@@ -1,0 +1,9 @@
+{
+  "uuid": "t3-ai-usage@mawox.github.io",
+  "name": "T3 AI Usage",
+  "description": "Unofficial. Shows the usage limits of every AI account in T3 Code (Claude, Codex, Cursor, Antigravity and others) in the top bar, with pace and reset times in the menu.\n\nNeeds T3 Code on this computer or on a server you can reach.",
+  "shell-version": ["46", "48", "49", "50", "51"],
+  "url": "https://github.com/Mawox/t3-ai-usage",
+  "settings-schema": "org.gnome.shell.extensions.t3-ai-usage",
+  "version-name": "1.0"
+}

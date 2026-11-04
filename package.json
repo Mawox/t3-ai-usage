@@ -1,0 +1,16 @@
+{
+  "name": "t3-ai-usage",
+  "private": true,
+  "type": "module",
+  "description": "Development tools for the T3 AI Usage GNOME Shell extension",
+  "license": "GPL-2.0-or-later",
+  "scripts": {
+    "lint": "eslint .",
+    "test": "gjs -m tests/model.test.js && gjs -m tests/t3client.test.js",
+    "pack": "scripts/pack.sh"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "eslint": "10.13.0"
+  }
+}
