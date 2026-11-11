@@ -12,7 +12,7 @@ import {PACKAGE_VERSION} from 'resource:///org/gnome/shell/misc/config.js';
 import {T3Server, makeHttpSession, serverSpecs} from './t3client.js';
 import {
     PANEL_DEFAULT_DRIVERS, ago, applyOrder, bindingWindow, clockTime, collectAccounts,
-    compactReset, effectivePercent, isFable, level, pace, paceText, relativeReset, secondsSince, windowId, windowKey,
+    compactReset, effectivePercent, isFable, level, pace, paceWarning, secondsSince, shortReset, windowId, windowKey,
 } from './model.js';
 
 // GNOME 51 removed St.BoxLayout's `vertical` in favour of `orientation`.
@@ -29,6 +29,9 @@ const STALE_ACCOUNT_SECONDS = 20 * 60;
 const KNOWN_ACCOUNT_DAYS = 30;
 // Servers added in the preferences warn this long before their sign-in runs out.
 const EXPIRY_WARNING_DAYS = 7;
+
+// The menu's grid: limit, bar, share left, reset.
+const COLUMNS = 4;
 
 const RING_SIZE = 18;
 const RING_STROKE = 3;
@@ -81,7 +84,7 @@ function makeBar(used, expectedUsed) {
     const left = 100 - used;
     const marker = expectedUsed === null || expectedUsed === undefined ? null : 100 - expectedUsed;
     const lvl = level(used);
-    const bar = new St.DrawingArea({style_class: 't3-ai-usage-bar', x_expand: true});
+    const bar = new St.DrawingArea({style_class: 't3-ai-usage-bar', x_expand: true, y_align: Clutter.ActorAlign.CENTER});
     bar.connect('repaint', area => {
         const cr = area.get_context();
         const [w, h] = area.get_surface_size();
@@ -126,6 +129,7 @@ export default class T3AiUsageExtension extends Extension {
             if (open)
                 this._refresh();
         });
+        this._buildMenu();
         Main.panel.addToStatusArea(this.uuid, this._button);
 
         this._settingsIds = RENDER_KEYS.map(key =>
@@ -162,6 +166,10 @@ export default class T3AiUsageExtension extends Extension {
         this._button?.destroy();
         this._button = null;
         this._panelBox = null;
+        this._rows = null;
+        this._scroll = null;
+        this._status = null;
+        this._updated = null;
         this._settings = null;
         this._accounts = [];
         this._states = null;
@@ -377,50 +385,102 @@ export default class T3AiUsageExtension extends Extension {
         return account.windows.filter(w => !hidden.has(windowKey(account.key, windowId(w))));
     }
 
-    _renderMenu(accounts) {
+    // The menu's parts, built once. The account rows scroll when they are taller than
+    // the screen; the server notes and the footer below them always stay in view.
+    _buildMenu() {
         const menu = this._button.menu;
-        menu.removeAll();
+        // One grid for all accounts, so the bars of every limit line up.
+        this._rows = new St.Widget({
+            layout_manager: new Clutter.GridLayout({orientation: Clutter.Orientation.VERTICAL}),
+            x_expand: true,
+        });
+        const content = new St.BoxLayout({...VERTICAL, style_class: 't3-ai-usage-content'});
+        content.add_child(this._rows);
+        // Reactive, so the pointer picks it and the wheel scrolls it: the rows are not.
+        this._scroll = new St.ScrollView({
+            child: content,
+            reactive: true,
+            overlay_scrollbars: true,
+            hscrollbar_policy: St.PolicyType.NEVER,
+            vscrollbar_policy: St.PolicyType.AUTOMATIC,
+            style_class: 't3-ai-usage-scroll',
+        });
+        const accounts = new PopupMenu.PopupMenuSection();
+        accounts.actor.add_child(this._scroll);
+        menu.addMenuItem(accounts);
+        menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
+        this._status = new St.BoxLayout({...VERTICAL, style_class: 't3-ai-usage-content'});
+        this._updated = new St.Label({
+            style_class: 't3-ai-usage-dim', x_expand: true, y_align: Clutter.ActorAlign.CENTER,
+        });
+        const button = (label, activate) => {
+            const b = new St.Button({label, can_focus: true, style_class: 'button t3-ai-usage-button'});
+            b.connect('clicked', activate);
+            return b;
+        };
+        const footer = new St.BoxLayout({style_class: 't3-ai-usage-content t3-ai-usage-footer'});
+        footer.add_child(this._updated);
+        footer.add_child(button('Refresh', () => this._refresh(true)));
+        footer.add_child(button('Settings', () => {
+            menu.close();
+            this.openPreferences();
+        }));
+        const bottom = new PopupMenu.PopupMenuSection();
+        bottom.actor.add_child(this._status);
+        bottom.actor.add_child(footer);
+        menu.addMenuItem(bottom);
+    }
+
+    _renderMenu(accounts) {
+        // Clutter spacing is in physical pixels, CSS sizes are not.
+        const scale = St.ThemeContext.get_for_stage(global.stage).scale_factor;
+        this._rows.layout_manager.column_spacing = 12 * scale;
+        this._rows.layout_manager.row_spacing = 4 * scale;
+        this._rows.destroy_all_children();
+        this._row = 0;
 
         if (!this._servers.length)
             this._addText('No T3 server: turn on this computer or add a server in Settings', 't3-ai-usage-error');
         else if (!this._hasData() && !this._allFailed())
             this._addText('Waiting for T3…', 't3-ai-usage-dim');
-        accounts.forEach((account, i) => {
-            if (i > 0)
-                menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-            this._addAccount(account);
-        });
+        accounts.forEach((account, i) => this._addAccount(account, i === 0));
 
-        menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+        this._status.destroy_all_children();
+        const note = text => this._status.add_child(new St.Label({text, style_class: 't3-ai-usage-error'}));
         for (const server of this._servers) {
             const state = this._states.get(server.id);
             if (state?.error) {
                 const last = state.okAt ? `, last data ${state.okAt.format('%H:%M')}` : '';
-                this._addText(`${server.name}: ${state.error}${last}`, 't3-ai-usage-error');
+                note(`${server.name}: ${state.error}${last}`);
                 continue;
             }
             const left = server.expiresAt ? (Date.parse(server.expiresAt) - Date.now()) / 864e5 : Infinity;
             if (left <= EXPIRY_WARNING_DAYS) {
                 const days = Math.max(1, Math.ceil(left));
-                this._addText(`${server.name}: sign-in expires in ${days} ${days === 1 ? 'day' : 'days'}; ` +
-                    'sign in again in Settings', 't3-ai-usage-error');
+                note(`${server.name}: sign-in expires in ${days} ${days === 1 ? 'day' : 'days'}; ` +
+                    'sign in again in Settings');
             }
         }
-        const refresh = new PopupMenu.PopupMenuItem('Refresh now');
-        refresh.connect('activate', () => this._refresh(true));
-        menu.addMenuItem(refresh);
-        const prefs = new PopupMenu.PopupMenuItem('Settings…');
-        prefs.connect('activate', () => this.openPreferences());
-        menu.addMenuItem(prefs);
+        this._status.visible = this._status.get_n_children() > 0;
         const okTimes = this._servers.map(server => this._states.get(server.id)?.okAt).filter(Boolean);
-        if (okTimes.length) {
-            const latest = okTimes.reduce((a, b) => (a.compare(b) >= 0 ? a : b));
-            this._addText(`From T3 Code, updated ${latest.format('%H:%M')}`, 't3-ai-usage-dim');
-        }
+        this._updated.text = okTimes.length
+            ? `Updated ${okTimes.reduce((x, y) => (x.compare(y) >= 0 ? x : y)).format('%H:%M')}`
+            : '';
     }
 
-    _addAccount(account) {
-        const header = new PopupMenu.PopupBaseMenuItem({reactive: false, style_class: 't3-ai-usage-row'});
+    // Puts the cells of one row into the grid: [actor, column, columns spanned].
+    _addRow(...cells) {
+        for (const [actor, column, span] of cells)
+            this._rows.layout_manager.attach(actor, column, this._row, span, 1);
+        this._row++;
+    }
+
+    _addAccount(account, first) {
+        const header = new St.BoxLayout({
+            style_class: first ? 't3-ai-usage-header' : 't3-ai-usage-header t3-ai-usage-header-next',
+            x_expand: true,
+        });
         const name = new St.Label({text: account.name, style_class: 't3-ai-usage-account-name', x_expand: true});
         if (account.accent)
             name.set_style(`color: ${account.accent};`);
@@ -430,7 +490,7 @@ export default class T3AiUsageExtension extends Extension {
         const plan = this._servers.length < 2 || account.sources.includes(local)
             ? account.plan : `${account.plan} · ${account.sources.join(', ')}`;
         header.add_child(new St.Label({text: plan, style_class: 't3-ai-usage-dim'}));
-        this._button.menu.addMenuItem(header);
+        this._addRow([header, 0, COLUMNS]);
 
         if (account.unavailable) {
             this._addText(account.unavailable.message ?? 'T3 could not read this account', 't3-ai-usage-error');
@@ -445,29 +505,23 @@ export default class T3AiUsageExtension extends Extension {
         const windows = this._windows(account);
         if (!windows.length)
             this._addText('All its limits are hidden in Settings', 't3-ai-usage-dim');
+        const cell = (text, styleClass, x_align = Clutter.ActorAlign.START) =>
+            new St.Label({text, style_class: styleClass, x_align, y_align: Clutter.ActorAlign.CENTER});
         for (const w of windows) {
             const pct = effectivePercent(w);
-            const item = new PopupMenu.PopupBaseMenuItem({reactive: false, style_class: 't3-ai-usage-window-item'});
-            const column = new St.BoxLayout({...VERTICAL, x_expand: true, style_class: 't3-ai-usage-window-box'});
-            const top = new St.BoxLayout({x_expand: true, style_class: 't3-ai-usage-row'});
-            top.add_child(new St.Label({text: w.label, style_class: 't3-ai-usage-window', x_expand: true}));
-            top.add_child(new St.Label({text: `${Math.round(100 - pct)} % left`, style_class: `t3-ai-usage-pct t3-ai-usage-${level(pct)}`}));
-            top.add_child(new St.Label({text: relativeReset(w.resetsAt, round), style_class: 't3-ai-usage-when'}));
-            column.add_child(top);
             const p = pace(w);
-            column.add_child(makeBar(pct, p?.expected));
-            const text = paceText(p, round);
-            if (text)
-                column.add_child(new St.Label({text, style_class: `t3-ai-usage-pace t3-ai-usage-pace-${p.level ?? 'ok'}`}));
-            item.add_child(column);
-            this._button.menu.addMenuItem(item);
+            this._addRow(
+                [cell(w.label, null), 0, 1],
+                [makeBar(pct, p?.expected), 1, 1],
+                [cell(`${Math.round(100 - pct)} % left`, `t3-ai-usage-pct t3-ai-usage-${level(pct)}`, Clutter.ActorAlign.END), 2, 1],
+                [cell(shortReset(w.resetsAt, round), 't3-ai-usage-dim t3-ai-usage-when'), 3, 1]);
+            const warning = paceWarning(p, round);
+            if (warning)
+                this._addRow([cell(warning, `t3-ai-usage-pace t3-ai-usage-pace-${p.level}`), 1, COLUMNS - 1]);
         }
     }
 
     _addText(text, styleClass) {
-        const item = new PopupMenu.PopupMenuItem(text, {reactive: false});
-        if (styleClass)
-            item.label.add_style_class_name(styleClass);
-        this._button.menu.addMenuItem(item);
+        this._addRow([new St.Label({text, style_class: styleClass}), 0, COLUMNS]);
     }
 }

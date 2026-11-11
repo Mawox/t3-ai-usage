@@ -5,5 +5,5 @@
   "shell-version": ["46", "48", "49", "50", "51"],
   "url": "https://github.com/Mawox/t3-ai-usage",
   "settings-schema": "org.gnome.shell.extensions.t3-ai-usage",
-  "version-name": "1.0"
+  "version-name": "1.1"
 }
