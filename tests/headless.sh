@@ -3,6 +3,7 @@
 # a report and screenshots of the top bar, the menu and the preferences.
 #
 #   tests/headless.sh OUTPUT_DIR
+#   MONITOR=1728x420 tests/headless.sh OUTPUT_DIR   (a short screen: the menu scrolls)
 #
 # Needs gnome-shell, gjs, dbus-run-session and python3-gi. Nothing outside a
 # temporary directory is touched: HOME, the XDG directories and GSettings all
@@ -19,7 +20,7 @@ if [ "${1:-}" = --inside ]; then
         { read -r address; read -r system_bus; } < <(dbus-daemon --session --fork --print-address=1 --print-pid=1)
         export DBUS_SYSTEM_BUS_ADDRESS=$address
     fi
-    gnome-shell --headless --wayland --virtual-monitor 1728x1080 > "$OUT/shell.log" 2>&1 &
+    gnome-shell --headless --wayland --virtual-monitor "$MONITOR" > "$OUT/shell.log" 2>&1 &
     shell=$!
     for _ in $(seq 90); do
         ev 'true' 2> /dev/null | grep -q '^(true' && break
@@ -37,8 +38,16 @@ if [ "${1:-}" = --inside ]; then
         sleep 2
         echo "menu: $(ev "const out = []; const walk = a => { if (a instanceof imports.gi.St.Label && a.text) out.push(a.text); a.get_children?.().forEach(walk); }; walk(Main.panel.statusArea['$UUID'].menu.box); out.join(' / ')")"
         echo "menu-box: $(ev "const b = Main.panel.statusArea['$UUID'].menu.actor; const [x, y] = b.get_transformed_position(); [x, y, b.width, b.height].map(Math.round).join(' ')")"
+        # The menu ends above the screen's bottom edge; its account list scrolls (content
+        # height, visible height); the wheel reaches the list. After the screenshots: the keyboard reaches the footer.
+        echo "menu-fits: $(ev "const b = Main.panel.statusArea['$UUID'].menu.actor; b.get_transformed_position()[1] + b.height <= global.stage.height")"
+        echo "menu-scroll: $(ev "const s = Main.extensionManager.lookup('$UUID').stateObj._scroll; const a = s.get_vadjustment(); const [x, y] = s.get_transformed_position(); const picked = global.stage.get_actor_at_pos(imports.gi.Clutter.PickMode.REACTIVE, x + 40, y + 20); [Math.round(a.upper), Math.round(a.page_size), picked === s ? 'wheel-ok' : 'wheel-missed'].join(' ')")"
     } > "$OUT/report.txt" 2>&1
     shot "$OUT/menu-full.png"
+    ev "const a = Main.extensionManager.lookup('$UUID').stateObj._scroll.get_vadjustment(); a.value = a.upper; 'ok'" > /dev/null
+    sleep 1
+    shot "$OUT/menu-scrolled-full.png"
+    echo "menu-keys: $(ev "const m = Main.panel.statusArea['$UUID'].menu; m.actor.navigate_focus(null, imports.gi.St.DirectionType.TAB_FORWARD, false); global.stage.key_focus?.label ?? 'none'")" >> "$OUT/report.txt"
     ev "Main.panel.statusArea['$UUID'].menu.close(); 'ok'" > /dev/null
     gnome-extensions prefs "$UUID" > "$OUT/prefs.log" 2>&1 || echo "prefs: could not open" >> "$OUT/report.txt"
     sleep 6
@@ -54,7 +63,7 @@ fi
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 OUT=$(mkdir -p "$1" && cd "$1" && pwd)
-export UUID=t3-ai-usage@mawox.github.io
+export UUID=t3-ai-usage@mawox.github.io MONITOR=${MONITOR:-1728x1080}
 # A short path: the Wayland socket path must stay under 108 bytes.
 WORK=$(mktemp -d /tmp/t3aiu.XXXXXX)
 export HOME=$WORK/home XDG_CONFIG_HOME=$WORK/config XDG_DATA_HOME=$WORK/data XDG_CACHE_HOME=$WORK/cache
@@ -101,7 +110,8 @@ nums = [int(n) for n in report.get('menu-box', '').replace("'", ' ').replace('"'
 if len(nums) >= 4:
     x, y, w, h = nums[-4:]
     crop('menu', x - 24, 0, w + 48, y + h + 24)
-    crop('panel', 1728 - 560, 0, 560, max(28, y - 4), source='menu')
+    crop('menu-scrolled', x - 24, 0, w + 48, y + h + 24)
+    crop('panel', x + w - 536, 0, 560, max(28, y - 4), source='menu')
 win = report.get('prefs-window', '').replace("'", ' ').replace('"', ' ').replace(')', ' ').split()
 nums = [int(n) for n in win if n.lstrip('-').isdigit()]
 if len(nums) >= 4:

@@ -183,11 +183,12 @@ export function longDuration(seconds, round = false) {
     return units(seconds, round).map(([value, unit]) => `${value} ${LONG_UNITS[unit]}`).join(' ');
 }
 
-export function relativeReset(iso, round = false) {
+// "↻ 2 h" for the menu: the time until a limit resets.
+export function shortReset(iso, round = false) {
     const s = secondsUntil(iso);
     if (s === null)
         return '';
-    return s <= 0 ? 'resetting' : `resets in ${longDuration(s, round)}`;
+    return `↻ ${s <= 0 ? 'now' : longDuration(s, round)}`;
 }
 
 // Length of a window in seconds. T3 reports it for session and weekly windows;
@@ -235,24 +236,22 @@ export function pace(w) {
     return {expected, projected, level: projected >= 90 ? 'warn' : 'ok'};
 }
 
-export function paceText(p, round = false) {
-    if (!p)
+// The line under a limit that is on course to run short, or null when its pace is fine.
+export function paceWarning(p, round = false) {
+    if (!p?.level || p.level === 'ok')
         return null;
     if (p.full)
         return 'Limit reached';
-    if (p.exhaustIn !== undefined) {
-        // The two times add up to the reset time shown above the line: the lockout is
-        // what the shown reset leaves after the shown run-out time. When both show the
-        // same, the line gives only the lockout.
-        const exhaust = shownSeconds(p.exhaustIn, round);
-        const lockout = shownSeconds(p.remaining, round) - exhaust;
-        if (lockout < 60)
-            return `On pace to run out ${longDuration(p.lockout, round)} before the reset`;
-        return `On pace to run out in ${longDuration(exhaust, round)}, ${longDuration(lockout, round)} before the reset`;
-    }
-    if (p.projected !== undefined)
+    if (p.exhaustIn === undefined)
         return `On pace for ${Math.round(100 - p.projected)} % left at the reset`;
-    return null;
+    // The two times add up to the reset time shown on the line above: the lockout is
+    // what the shown reset leaves after the shown run-out time. When both show the
+    // same, the line gives only the lockout.
+    const exhaust = shownSeconds(p.exhaustIn, round);
+    const lockout = shownSeconds(p.remaining, round) - exhaust;
+    if (lockout < 60)
+        return `Runs out ${longDuration(p.lockout, round)} before the reset`;
+    return `Runs out in ${longDuration(exhaust, round)}, ${longDuration(lockout, round)} before the reset`;
 }
 
 export function clockTime(iso) {

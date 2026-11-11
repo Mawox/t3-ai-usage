@@ -7,7 +7,7 @@ A GNOME Shell extension that shows the usage limits of every AI account in [T3 C
 T3 Code already checks the limits of every provider account it runs: Claude, Codex, Cursor, Antigravity and others. This extension reads them from T3 and shows:
 
 - **Top bar:** a ring for each account, filled to the share left of its fullest limit, and the time until that limit resets.
-- **Menu:** every limit of every account, with the share left, the reset time, a bar whose marker shows where an even pace would be, and where the current pace leads ("On pace to run out in 2 d, 1 d before the reset").
+- **Menu:** one line for every limit of every account: a bar whose marker shows where an even pace would be, the share left, and the time until the reset (↻). A limit on course to run short gets a second line ("Runs out in 2 d, 1 d before the reset"). On a short screen the list scrolls.
 - **Settings:** the order of the accounts, which of them go in the top bar, their short labels, which limits to hide, and T3 servers on other computers.
 
 ![Settings](screenshots/settings.png)
@@ -67,7 +67,7 @@ npm test          # needs gjs, the Soup 3 typelib and glib-compile-schemas
 scripts/pack.sh   # builds dist/t3-ai-usage@mawox.github.io.shell-extension.zip
 ```
 
-`tests/headless.sh OUTPUT_DIR` runs the extension in a headless GNOME Shell against `tests/mock-t3.js`, a stand-in T3 server with sample accounts, and saves a report and screenshots. It touches nothing outside a temporary directory. To test another GNOME version, run it in one of the containers in `tests/containers/` (Ubuntu 24.04, Debian 13, Fedora 43, Ubuntu 26.04):
+`tests/headless.sh OUTPUT_DIR` runs the extension in a headless GNOME Shell against `tests/mock-t3.js`, a stand-in T3 server with sample accounts, and saves a report and screenshots; `MONITOR=1728x420` in front of the command gives it a short screen, where the menu must scroll. It touches nothing outside a temporary directory. To test another GNOME version, run it in one of the containers in `tests/containers/` (Ubuntu 24.04, Debian 13, Fedora 43, Ubuntu 26.04):
 
 ```sh
 docker build -t t3-ai-usage-test:ubuntu-24.04 -f tests/containers/ubuntu-24.04.Dockerfile tests/containers

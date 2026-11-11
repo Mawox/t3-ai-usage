@@ -44,23 +44,25 @@ equal(model.longDuration(2 * HOUR, false), '2 h', 'drops a zero second unit');
 equal(model.longDuration(20, false), '1 min', 'shows at least a minute');
 equal(model.compactReset(at(4 * DAY + 11 * HOUR + 30), false), '4d11h', 'compact reset');
 equal(model.compactReset(at(-5)), 'now', 'a passed reset is now');
-equal(model.relativeReset(at(3 * HOUR + 40 * MIN + 30), true), 'resets in 4 h', 'relative reset, rounded');
+equal(model.shortReset(at(3 * HOUR + 40 * MIN + 30), true), '↻ 4 h', 'short reset, rounded');
+equal(model.shortReset(at(-5)), '↻ now', 'a passed reset shows now');
 
 // Pace: the run-out time and the time before the reset add up to the reset shown.
 const reported = windowRunningOut(7 * DAY, 4.4 * DAY, 2.6 * DAY);
-equal(model.paceText(model.pace(reported), true), 'On pace to run out in 3 d, 1 d before the reset',
+equal(model.paceWarning(model.pace(reported), true), 'Runs out in 3 d, 1 d before the reset',
     'rounded pace adds up to the rounded reset');
-equal(model.paceText(model.pace(reported), false), 'On pace to run out in 2 d 14 h, 1 d 19 h before the reset',
+equal(model.paceWarning(model.pace(reported), false), 'Runs out in 2 d 14 h, 1 d 19 h before the reset',
     'unrounded pace adds up to the unrounded reset');
-equal(model.paceText(model.pace(windowRunningOut(7 * DAY, 4.4 * DAY, 3.6 * DAY)), true),
-    'On pace to run out 19 h before the reset', 'gives only the lockout when both round to the reset');
-equal(model.paceText(model.pace(windowRunningOut(7 * DAY, 4.4 * DAY, 23 * HOUR)), true),
-    'On pace to run out in 23 h, 3 d before the reset', 'mixed units');
+equal(model.paceWarning(model.pace(windowRunningOut(7 * DAY, 4.4 * DAY, 3.6 * DAY)), true),
+    'Runs out 19 h before the reset', 'gives only the lockout when both round to the reset');
+equal(model.paceWarning(model.pace(windowRunningOut(7 * DAY, 4.4 * DAY, 23 * HOUR)), true),
+    'Runs out in 23 h, 3 d before the reset', 'mixed units');
 
 const steady = {kind: 'weekly', windowDurationMins: 7 * 24 * 60, resetsAt: at(3.5 * DAY), usedPercent: 25};
-equal(model.paceText(model.pace(steady)), 'On pace for 50 % left at the reset', 'projection under the limit');
+equal(model.paceWarning(model.pace(steady)), null, 'no warning for a pace that leaves room');
+equal(model.paceWarning(model.pace({...steady, usedPercent: 46})), 'On pace for 8 % left at the reset', 'a pace that nearly uses it up');
 equal(Math.round(model.pace(steady).expected), 50, 'expected share used halfway through');
-equal(model.paceText(model.pace({...steady, usedPercent: 100})), 'Limit reached', 'full window');
+equal(model.paceWarning(model.pace({...steady, usedPercent: 100})), 'Limit reached', 'full window');
 equal(model.pace({kind: 'weekly', resetsAt: at(DAY), usedPercent: 10}), null, 'no pace without a window length');
 equal(model.pace({...steady, usedPercent: 0}).projected, undefined, 'no projection before any use');
 equal(model.pace(windowRunningOut(7 * DAY, 4 * DAY, DAY)).level, 'crit', 'long lockout is critical');

@@ -5,23 +5,19 @@
 .t3-ai-usage-error { color: #f0b429; font-weight: bold; }
 .t3-ai-usage-dim { color: rgba(255, 255, 255, 0.6); }
 
-.t3-ai-usage-row { spacing: 14px; }
+/* The menu: one line for each limit, in a list that scrolls on a short screen. */
+.t3-ai-usage-scroll { -st-vfade-offset: 24px; }
+.t3-ai-usage-content { padding: 2px 14px; }
+.t3-ai-usage-header { spacing: 14px; }
+.t3-ai-usage-header-next { padding-top: 8px; }
 .t3-ai-usage-account-name { font-weight: bold; }
-.t3-ai-usage-window { min-width: 12em; }
-.t3-ai-usage-pct { font-feature-settings: "tnum"; min-width: 3.5em; text-align: right; }
-.t3-ai-usage-when { color: rgba(255, 255, 255, 0.6); min-width: 9em; }
+.t3-ai-usage-bar { height: 10px; min-width: 9em; }
+.t3-ai-usage-pct, .t3-ai-usage-when { font-feature-settings: "tnum"; }
 .t3-ai-usage-ok { color: #33d17a; }
 .t3-ai-usage-warn { color: #ff7800; }
 .t3-ai-usage-crit { color: #e01b24; }
-
-.t3-ai-usage-window-box { spacing: 3px; }
-.t3-ai-usage-bar { height: 10px; min-width: 20em; }
 .t3-ai-usage-pace { font-size: 0.9em; }
-.t3-ai-usage-pace-ok { color: rgba(255, 255, 255, 0.6); }
 .t3-ai-usage-pace-warn { color: #ff7800; }
 .t3-ai-usage-pace-crit { color: #ff7b72; }
-
-/* Compact rows so every account fits on a laptop screen. */
-.t3-ai-usage-row, .t3-ai-usage-window-item { padding-top: 3px; padding-bottom: 3px; }
-.t3-ai-usage-window-item .t3-ai-usage-row { padding-top: 0; padding-bottom: 0; }
-.t3-ai-usage-window-box { spacing: 2px; }
+.t3-ai-usage-footer { spacing: 8px; padding-top: 4px; padding-bottom: 4px; }
+.t3-ai-usage-button { padding: 3px 12px; }
