@@ -9,7 +9,7 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import {PACKAGE_VERSION} from 'resource:///org/gnome/shell/misc/config.js';
 
-import {T3Server, makeHttpSession, serverSpecs} from './t3client.js';
+import {T3Server, Unavailable, makeHttpSession, serverSpecs} from './t3client.js';
 import {
     PANEL_DEFAULT_DRIVERS, ago, applyOrder, bindingWindow, clockTime, collectAccounts,
     compactReset, effectivePercent, isFable, level, pace, paceWarning, secondsSince, serverDown, shortReset, windowId, windowKey,
@@ -244,7 +244,8 @@ export default class T3AiUsageExtension extends Extension {
             state.providers = providers;
             state.error = null;
             state.okAt = GLib.DateTime.new_now_local();
-            state.okMono = GLib.get_monotonic_time() / 1e6;
+            // Wall-clock time, so a suspend counts towards the grace period.
+            state.okSeconds = GLib.get_real_time() / 1e6;
         } catch (e) {
             if (server !== this._servers?.find(s => s.id === server.id))
                 return;
@@ -253,6 +254,7 @@ export default class T3AiUsageExtension extends Extension {
             if (error !== state.error)
                 console.warn(`T3 AI Usage: ${server.name}: ${error}`);
             state.error = error;
+            state.unavailable = e instanceof Unavailable;
         }
     }
 
@@ -319,8 +321,8 @@ export default class T3AiUsageExtension extends Extension {
     // than the grace period.
     _down(server) {
         const state = this._states.get(server.id);
-        const sinceOk = state?.okMono ? GLib.get_monotonic_time() / 1e6 - state.okMono : null;
-        return serverDown(state?.error, sinceOk);
+        const sinceOk = state?.okSeconds ? GLib.get_real_time() / 1e6 - state.okSeconds : null;
+        return serverDown(state?.error, state?.unavailable, sinceOk);
     }
 
     // Every server is down, or none is set up.
