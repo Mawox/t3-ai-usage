@@ -9,10 +9,10 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import {PACKAGE_VERSION} from 'resource:///org/gnome/shell/misc/config.js';
 
-import {T3Server, makeHttpSession, serverSpecs} from './t3client.js';
+import {T3Server, Unavailable, makeHttpSession, serverSpecs} from './t3client.js';
 import {
     PANEL_DEFAULT_DRIVERS, ago, applyOrder, bindingWindow, clockTime, collectAccounts,
-    compactReset, effectivePercent, isFable, level, pace, paceWarning, secondsSince, shortReset, windowId, windowKey,
+    compactReset, effectivePercent, isFable, level, pace, paceWarning, secondsSince, serverDown, shortReset, windowId, windowKey,
 } from './model.js';
 
 // GNOME 51 removed St.BoxLayout's `vertical` in favour of `orientation`.
@@ -27,6 +27,12 @@ const FORCE_REFRESH_SECONDS = 5 * 60 + 30;
 // An account no server has managed to check for this long shows no numbers.
 const STALE_ACCOUNT_SECONDS = 20 * 60;
 const KNOWN_ACCOUNT_DAYS = 30;
+
+// GNOME Shell disables the extension while the screen is locked. The last answer of
+// each server survives that, so a T3 restart during a short sleep still gets its
+// grace period: {spec: server spec as JSON, state} by server id. Data only; nothing
+// polls or draws while the extension is off.
+let keptStates = null;
 // Servers added in the preferences warn this long before their sign-in runs out.
 const EXPIRY_WARNING_DAYS = 7;
 
@@ -118,8 +124,9 @@ export default class T3AiUsageExtension extends Extension {
         this._settings = this.getSettings();
         this._http = makeHttpSession();
         this._states = new Map();
-        this._createServers();
-        this._accounts = [];
+        this._createServers(keptStates);
+        keptStates = null;
+        this._accounts = this._collectAccounts(this._servers);
         this._running = false;
 
         this._button = new PanelMenu.Button(0.0, this.metadata.name, false);
@@ -136,7 +143,7 @@ export default class T3AiUsageExtension extends Extension {
             this._settings.connect(`changed::${key}`, () => this._render()));
         for (const key of ['servers', 'local-server']) {
             this._settingsIds.push(this._settings.connect(`changed::${key}`, () => {
-                this._createServers();
+                this._createServers(this._keptStates());
                 this._render();
                 this._refresh();
             }));
@@ -158,6 +165,7 @@ export default class T3AiUsageExtension extends Extension {
         for (const id of this._settingsIds ?? [])
             this._settings.disconnect(id);
         this._settingsIds = null;
+        keptStates = this._keptStates();
         for (const server of this._servers ?? [])
             server.destroy();
         this._servers = null;
@@ -175,13 +183,30 @@ export default class T3AiUsageExtension extends Extension {
         this._states = null;
     }
 
-    _createServers() {
+    // Each server's last answer, for _createServers() to carry over to a server whose
+    // settings (address, name, sign-in) did not change.
+    _keptStates() {
+        return new Map((this._servers ?? [])
+            .filter(server => this._states?.get(server.id)?.okSeconds)
+            .map(server => [server.id, {spec: JSON.stringify(server.spec), state: this._states.get(server.id)}]));
+    }
+
+    // kept: from _keptStates(), across a settings change or a screen lock.
+    _createServers(kept = null) {
         for (const server of this._servers ?? [])
             server.destroy();
         const specs = serverSpecs(this._settings);
         this._servers = specs.map(spec => new T3Server(spec, this._http));
         // A server whose address or sign-in changed starts over.
         this._states.clear();
+        for (const spec of specs) {
+            const entry = kept?.get(spec.id);
+            if (entry && entry.spec === JSON.stringify(spec)) {
+                // The re-check throttle runs on a clock that stops during suspend, and
+                // after a lock the server may hold old data: it may be re-checked at once.
+                this._states.set(spec.id, {...entry.state, lastForced: 0, observed: false});
+            }
+        }
         this._running = false;
         this._forceQueued = false;
     }
@@ -211,12 +236,18 @@ export default class T3AiUsageExtension extends Extension {
         await Promise.all(servers.map(server => this._updateServer(server, force)));
         if (!this._button || servers !== this._servers)
             return;
-        this._accounts = collectAccounts(servers
+        this._accounts = this._collectAccounts(servers);
+        // Only what servers reported in this poll counts as seen; restored or earlier
+        // answers are only shown.
+        this._recordAccounts(this._collectAccounts(servers.filter(s => this._states.get(s.id)?.observed)));
+        this._render();
+    }
+
+    _collectAccounts(servers) {
+        return collectAccounts(servers
             .map(server => ({env: server, state: this._states.get(server.id)}))
             .filter(({state}) => state?.providers)
             .map(({env, state}) => ({env, providers: state.providers, accents: state.accents})));
-        this._recordAccounts(this._accounts);
-        this._render();
     }
 
     async _updateServer(server, force) {
@@ -226,7 +257,9 @@ export default class T3AiUsageExtension extends Extension {
             const snapshot = await server.call('server.getConfig');
             for (const [id, instance] of Object.entries(snapshot.settings?.providerInstances ?? {}))
                 state.accents[id] = instance?.accentColor ?? null;
-            let providers = snapshot.providers ?? [];
+            const providers = snapshot.providers ?? [];
+            // Kept at once, so a lock during the re-check below keeps this answer.
+            this._answered(state, providers);
 
             const checked = providers.filter(p => p.enabled && p.usageLimits?.checkedAt);
             const newest = Math.min(...checked.map(p => secondsSince(p.usageLimits.checkedAt)));
@@ -234,16 +267,15 @@ export default class T3AiUsageExtension extends Extension {
             if (force || (newest > FORCE_REFRESH_SECONDS && now - state.lastForced > FORCE_REFRESH_SECONDS)) {
                 state.lastForced = now;
                 try {
-                    providers = (await server.call('server.refreshProviders')).providers ?? providers;
+                    const fresh = (await server.call('server.refreshProviders')).providers;
+                    if (fresh)
+                        this._answered(state, fresh);
                 } catch (e) {
                     // The snapshot from getConfig is still worth showing.
                     if (server === this._servers?.find(s => s.id === server.id))
                         console.warn(`T3 AI Usage: ${server.name}: re-check failed: ${e.message ?? e}`);
                 }
             }
-            state.providers = providers;
-            state.error = null;
-            state.okAt = GLib.DateTime.new_now_local();
         } catch (e) {
             if (server !== this._servers?.find(s => s.id === server.id))
                 return;
@@ -252,7 +284,20 @@ export default class T3AiUsageExtension extends Extension {
             if (error !== state.error)
                 console.warn(`T3 AI Usage: ${server.name}: ${error}`);
             state.error = error;
+            state.unavailable = e instanceof Unavailable;
+            state.observed = false;
         }
+    }
+
+    // The server answered with these providers. The time is wall-clock time, so a
+    // suspend counts towards the grace period; a failed re-check keeps it.
+    _answered(state, providers) {
+        state.providers = providers;
+        state.error = null;
+        state.unavailable = false;
+        state.observed = true;
+        state.okSeconds = GLib.get_real_time() / 1e6;
+        state.okAt = GLib.DateTime.new_from_unix_local(Math.floor(state.okSeconds));
     }
 
     // Remembers every account and its limit windows for the preferences window. Accounts
@@ -314,9 +359,17 @@ export default class T3AiUsageExtension extends Extension {
         return this._accounts.length > 0;
     }
 
-    // Every server failed, or none is set up.
+    // The server has failed since it last answered, or never answered, for longer
+    // than the grace period.
+    _down(server) {
+        const state = this._states.get(server.id);
+        const sinceOk = state?.okSeconds ? GLib.get_real_time() / 1e6 - state.okSeconds : null;
+        return serverDown(state?.error, state?.unavailable, sinceOk);
+    }
+
+    // Every server is down, or none is set up.
     _allFailed() {
-        return this._servers.every(server => this._states.get(server.id)?.error);
+        return this._servers.every(server => this._down(server));
     }
 
     _renderPanel(accounts, labels) {
@@ -450,7 +503,7 @@ export default class T3AiUsageExtension extends Extension {
         const note = text => this._status.add_child(new St.Label({text, style_class: 't3-ai-usage-error'}));
         for (const server of this._servers) {
             const state = this._states.get(server.id);
-            if (state?.error) {
+            if (state?.error && this._down(server)) {
                 const last = state.okAt ? `, last data ${state.okAt.format('%H:%M')}` : '';
                 note(`${server.name}: ${state.error}${last}`);
                 continue;

@@ -37,6 +37,18 @@ const encoder = new TextEncoder();
 
 export class T3Error extends Error {}
 class AuthRejected extends T3Error {}
+// The server did not answer, or its proxy answered for it: T3 is stopped, restarting
+// or out of reach. Errors that need the user (sign-in, version) are plain T3Errors.
+export class Unavailable extends T3Error {}
+
+// Statuses a proxy or server gives while T3 restarts or is overloaded. Others, such
+// as 511 (sign in to the network), need the user.
+const TRANSIENT_STATUSES = [500, 502, 503, 504];
+// WebSocket closes before the answer that mean T3 went away: none or no status
+// (0, 1005), normal or going away (1000, 1001), dropped (1006), internal error,
+// restart, try later, bad gateway (1011-1014). Others, such as 1002, 1003, 1007,
+// 1008 and 1009, refuse the request and need the user.
+const OUTAGE_CLOSE_CODES = [0, 1000, 1001, 1005, 1006, 1011, 1012, 1013, 1014];
 
 function isCancelled(e) {
     return e?.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED);
@@ -48,13 +60,17 @@ function friendlyError(e) {
     if (isCancelled(e))
         return new T3Error('stopped');
     if (e?.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CONNECTION_REFUSED))
-        return new T3Error('T3 is not running');
+        return new Unavailable('T3 is not running');
+    if (e?.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CONNECTION_CLOSED) ||
+        e?.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.BROKEN_PIPE) ||
+        e?.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.PARTIAL_INPUT))
+        return new Unavailable('T3 closed the connection');
     if (e?.matches?.(Gio.ResolverError, Gio.ResolverError.NOT_FOUND) ||
         e?.matches?.(Gio.ResolverError, Gio.ResolverError.TEMPORARY_FAILURE) ||
         e?.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.TIMED_OUT) ||
         e?.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.NETWORK_UNREACHABLE) ||
         e?.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.HOST_UNREACHABLE))
-        return new T3Error('unreachable');
+        return new Unavailable('unreachable');
     return new T3Error(String(e?.message ?? e));
 }
 
@@ -112,7 +128,7 @@ export function parseServers(json) {
 
 export function serverSpecs(settings) {
     const remote = parseServers(settings.get_string('servers'))
-        .map(s => ({id: s.id, name: s.name || s.url, url: s.url}));
+        .map(s => ({id: s.id, name: s.name || s.url, url: s.url, signedIn: s.signedIn ?? null}));
     return settings.get_boolean('local-server') ? [{id: LOCAL_ID, name: LOCAL_NAME, local: true}, ...remote] : remote;
 }
 
@@ -261,6 +277,7 @@ function findT3Command() {
 
 export class T3Server {
     constructor(spec, http) {
+        this.spec = spec;
         this.id = spec.id;
         this.name = spec.name;
         this.local = Boolean(spec.local);
@@ -320,7 +337,9 @@ export class T3Server {
         } catch (e) {
             if (isCancelled(e))
                 throw e;
-            throw new T3Error('T3 is not running');
+            if (e?.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.NOT_FOUND))
+                throw new Unavailable('T3 is not running');
+            throw new T3Error(`cannot read T3's server-runtime.json: ${e?.message ?? e}`);
         }
         if (typeof runtime?.origin !== 'string' || !/^https?:\/\//.test(runtime.origin))
             throw new T3Error('T3\'s server-runtime.json has no address');
@@ -407,6 +426,8 @@ export class T3Server {
         const {status, body} = await sendJson(this._http, msg, this._cancellable);
         if (status === Soup.Status.UNAUTHORIZED)
             throw new AuthRejected('T3 rejected the token');
+        if (TRANSIENT_STATUSES.includes(status))
+            throw new Unavailable(`T3 answered HTTP ${status} to the ticket request`);
         if (status !== Soup.Status.OK)
             throw new T3Error(`T3 answered HTTP ${status} to the ticket request`);
         if (typeof body?.ticket !== 'string' || !body.ticket)
@@ -423,6 +444,8 @@ export class T3Server {
         } catch (e) {
             if (msg.status_code === 426)
                 throw new T3Error('this T3 Code version is not supported yet; update T3 AI Usage');
+            if (TRANSIENT_STATUSES.includes(msg.status_code))
+                throw new Unavailable(`T3 answered HTTP ${msg.status_code} to the WebSocket request`);
             throw e;
         }
     }
@@ -436,7 +459,7 @@ export class T3Server {
             let settled = false;
             let timer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, TIMEOUT_SECONDS, () => {
                 timer = 0;
-                finish(reject, new T3Error(`no answer to ${method} in ${TIMEOUT_SECONDS} s`));
+                finish(reject, new Unavailable(`no answer to ${method} in ${TIMEOUT_SECONDS} s`));
                 return GLib.SOURCE_REMOVE;
             });
             const finish = (settle, value) => {
@@ -476,7 +499,15 @@ export class T3Server {
                 }
             });
             conn.connect('error', (_conn, error) => finish(reject, friendlyError(error)));
-            conn.connect('closed', () => finish(reject, new T3Error('T3 closed the connection')));
+            conn.connect('closed', () => {
+                const code = conn.get_close_code();
+                if (OUTAGE_CLOSE_CODES.includes(code)) {
+                    finish(reject, new Unavailable('T3 closed the connection'));
+                } else {
+                    const reason = conn.get_close_data();
+                    finish(reject, new T3Error(`T3 refused the request (${code}${reason ? `: ${reason}` : ''})`));
+                }
+            });
             conn.send_text(JSON.stringify({_tag: 'Request', id: '1', tag: method, payload: {}, headers: []}));
         });
     }

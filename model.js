@@ -38,6 +38,19 @@ export function secondsSince(iso) {
     return s === null ? Infinity : -s;
 }
 
+// A server that stops answering keeps showing its last numbers this long before
+// the menu reports it: a T3 update or restart takes it away for a minute or two.
+export const SERVER_GRACE_SECONDS = 5 * 60;
+
+// error: the last poll's error, or null. unavailable: the error is only that the
+// server did not answer; any other error (sign-in, version) is reported at once.
+// sinceOk: seconds since the server last answered, or null when it never has.
+export function serverDown(error, unavailable, sinceOk) {
+    if (!error)
+        return false;
+    return !unavailable || !(sinceOk !== null && sinceOk >= 0 && sinceOk <= SERVER_GRACE_SECONDS);
+}
+
 function defaultRank(driver) {
     const i = DRIVER_ORDER.indexOf(driver);
     return i < 0 ? DRIVER_ORDER.length : i;

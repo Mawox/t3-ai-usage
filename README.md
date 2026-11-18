@@ -46,6 +46,8 @@ To update, install the new zip the same way and log in again.
 
 If T3 printed the link for 127.0.0.1, also enter the address the server has for you, such as `https://server.tailnet.ts.net`. An account signed in on several servers appears once.
 
+When a server stops answering, as it does for a minute or two while T3 updates or restarts, the menu keeps its last numbers. It reports the server, with the time of its last data, at the first check after it has gone 5 minutes without answering (about 6 minutes, time asleep included). A server that has never answered, and an error you need to act on, such as an expired sign-in or an unsupported T3 version, are reported at once.
+
 ## Privacy
 
 - The extension talks only to the T3 servers you set up and sends nothing anywhere else.

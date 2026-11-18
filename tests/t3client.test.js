@@ -17,6 +17,7 @@ GLib.setenv('PATH', '/nonexistent', true);
 const t3 = await import(`file://${repo}/t3client.js`);
 
 const PORT = 3990;
+const DAY_MS = 864e5;
 const URL = `http://127.0.0.1:${PORT}`;
 let failures = 0;
 let count = 0;
@@ -35,6 +36,17 @@ async function rejects(promise, name) {
         check(false, name, '(did not fail)');
     } catch (e) {
         check(e instanceof t3.T3Error, name, e.message);
+    }
+}
+
+// fails with an Unavailable error (the server did not answer) or, when unavailable is
+// false, with an error that needs the user.
+async function failsAs(promise, unavailable, name) {
+    try {
+        await promise;
+        check(false, name, '(did not fail)');
+    } catch (e) {
+        check(e instanceof t3.T3Error && (e instanceof t3.Unavailable) === unavailable, name, e.message);
     }
 }
 
@@ -113,6 +125,24 @@ try {
     check(localConfig.providers?.length === 4, 'keeps a valid token when renewal fails');
     await t3.writeToken('local', {token: 'local-demo-token', expiresAt: new Date(Date.now() - 60e3).toISOString()});
     await rejects(new t3.T3Server(local, http).call('server.getConfig'), 'an expired token without t3 fails');
+
+    // Which failures get the grace period: only those where the server did not answer.
+    const future = new Date(Date.now() + DAY_MS).toISOString();
+    for (const [status, unavailable] of [[502, true], [503, true], [511, false], [403, false]]) {
+        const spec = {id: `status-${status}`, name: 'status', url: URL};
+        await t3.writeToken(spec.id, {token: `fail-${status}`, expiresAt: future});
+        await failsAs(new t3.T3Server(spec, http).call('server.getConfig'), unavailable,
+            `HTTP ${status} to the ticket request ${unavailable ? 'is' : 'is not'} a server that did not answer`);
+    }
+    await t3.writeToken('closed', {token: 'remote-demo-token', expiresAt: future});
+    await failsAs(new t3.T3Server({id: 'closed', name: 'closed', url: 'http://127.0.0.1:1'}, http)
+        .call('server.getConfig'), true, 'a refused connection is a server that did not answer');
+    const runtime = Gio.File.new_for_path(`${work}/.t3/userdata/server-runtime.json`);
+    await t3.writeToken('local', {token: 'local-demo-token', expiresAt: future});
+    runtime.replace_contents(new TextEncoder().encode('{not json'), null, false, Gio.FileCreateFlags.NONE, null);
+    await failsAs(new t3.T3Server(local, http).call('server.getConfig'), false, 'an unreadable runtime file needs the user');
+    runtime.delete(null);
+    await failsAs(new t3.T3Server(local, http).call('server.getConfig'), true, 'no runtime file: T3 is not running');
 } finally {
     mock.force_exit();
     Gio.Subprocess.new([rm, '-rf', work], 0).wait(null);
