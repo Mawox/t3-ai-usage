@@ -10,6 +10,7 @@
 // Accepted bearer tokens: `local-demo-token` (what tests/fake-t3 issues),
 // `remote-demo-token`, and `admin-demo-token`, which has more scopes than reading.
 // The pairing code `DEMOPAIRING1` exchanges for a new read-only token.
+// A bearer token `fail-<status>` gets that HTTP status from the ticket endpoint.
 
 import GLib from 'gi://GLib';
 import Soup from 'gi://Soup?version=3.0';
@@ -91,6 +92,11 @@ function reply(msg, status, body) {
 const server = new Soup.Server();
 
 server.add_handler('/api/auth/websocket-ticket/rpc', (_server, msg) => {
+    const forced = /^Bearer fail-(\d{3})$/.exec(msg.get_request_headers().get_one('Authorization') ?? '');
+    if (forced) {
+        reply(msg, Number(forced[1]), {error: 'forced by the test'});
+        return;
+    }
     if (!bearer(msg)) {
         reply(msg, 401, {error: 'unauthorized'});
         return;

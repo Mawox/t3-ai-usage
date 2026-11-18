@@ -27,6 +27,12 @@ const FORCE_REFRESH_SECONDS = 5 * 60 + 30;
 // An account no server has managed to check for this long shows no numbers.
 const STALE_ACCOUNT_SECONDS = 20 * 60;
 const KNOWN_ACCOUNT_DAYS = 30;
+
+// GNOME Shell disables the extension while the screen is locked. The last answer of
+// each server survives that, so a T3 restart during a short sleep still gets its
+// grace period: {spec: server spec as JSON, state} by server id. Data only; nothing
+// polls or draws while the extension is off.
+let keptStates = null;
 // Servers added in the preferences warn this long before their sign-in runs out.
 const EXPIRY_WARNING_DAYS = 7;
 
@@ -118,7 +124,8 @@ export default class T3AiUsageExtension extends Extension {
         this._settings = this.getSettings();
         this._http = makeHttpSession();
         this._states = new Map();
-        this._createServers();
+        this._createServers(keptStates);
+        keptStates = null;
         this._accounts = [];
         this._running = false;
 
@@ -158,6 +165,9 @@ export default class T3AiUsageExtension extends Extension {
         for (const id of this._settingsIds ?? [])
             this._settings.disconnect(id);
         this._settingsIds = null;
+        keptStates = new Map((this._servers ?? [])
+            .filter(server => this._states?.get(server.id)?.okSeconds)
+            .map(server => [server.id, {spec: JSON.stringify(server.spec), state: this._states.get(server.id)}]));
         for (const server of this._servers ?? [])
             server.destroy();
         this._servers = null;
@@ -175,13 +185,19 @@ export default class T3AiUsageExtension extends Extension {
         this._states = null;
     }
 
-    _createServers() {
+    // kept: the states saved by disable(), for servers whose settings did not change.
+    _createServers(kept = null) {
         for (const server of this._servers ?? [])
             server.destroy();
         const specs = serverSpecs(this._settings);
         this._servers = specs.map(spec => new T3Server(spec, this._http));
         // A server whose address or sign-in changed starts over.
         this._states.clear();
+        for (const spec of specs) {
+            const entry = kept?.get(spec.id);
+            if (entry && entry.spec === JSON.stringify(spec))
+                this._states.set(spec.id, entry.state);
+        }
         this._running = false;
         this._forceQueued = false;
     }
@@ -227,6 +243,9 @@ export default class T3AiUsageExtension extends Extension {
             for (const [id, instance] of Object.entries(snapshot.settings?.providerInstances ?? {}))
                 state.accents[id] = instance?.accentColor ?? null;
             let providers = snapshot.providers ?? [];
+            // Wall-clock time, so a suspend counts towards the grace period. A re-check
+            // that fails keeps the time of this answer.
+            let okSeconds = GLib.get_real_time() / 1e6;
 
             const checked = providers.filter(p => p.enabled && p.usageLimits?.checkedAt);
             const newest = Math.min(...checked.map(p => secondsSince(p.usageLimits.checkedAt)));
@@ -235,6 +254,7 @@ export default class T3AiUsageExtension extends Extension {
                 state.lastForced = now;
                 try {
                     providers = (await server.call('server.refreshProviders')).providers ?? providers;
+                    okSeconds = GLib.get_real_time() / 1e6;
                 } catch (e) {
                     // The snapshot from getConfig is still worth showing.
                     if (server === this._servers?.find(s => s.id === server.id))
@@ -243,9 +263,8 @@ export default class T3AiUsageExtension extends Extension {
             }
             state.providers = providers;
             state.error = null;
-            state.okAt = GLib.DateTime.new_now_local();
-            // Wall-clock time, so a suspend counts towards the grace period.
-            state.okSeconds = GLib.get_real_time() / 1e6;
+            state.okSeconds = okSeconds;
+            state.okAt = GLib.DateTime.new_from_unix_local(Math.floor(okSeconds));
         } catch (e) {
             if (server !== this._servers?.find(s => s.id === server.id))
                 return;
