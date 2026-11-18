@@ -57,7 +57,8 @@ function friendlyError(e) {
     if (e?.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CONNECTION_REFUSED))
         return new Unavailable('T3 is not running');
     if (e?.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CONNECTION_CLOSED) ||
-        e?.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.BROKEN_PIPE))
+        e?.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.BROKEN_PIPE) ||
+        e?.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.PARTIAL_INPUT))
         return new Unavailable('T3 closed the connection');
     if (e?.matches?.(Gio.ResolverError, Gio.ResolverError.NOT_FOUND) ||
         e?.matches?.(Gio.ResolverError, Gio.ResolverError.TEMPORARY_FAILURE) ||
@@ -122,7 +123,7 @@ export function parseServers(json) {
 
 export function serverSpecs(settings) {
     const remote = parseServers(settings.get_string('servers'))
-        .map(s => ({id: s.id, name: s.name || s.url, url: s.url}));
+        .map(s => ({id: s.id, name: s.name || s.url, url: s.url, signedIn: s.signedIn ?? null}));
     return settings.get_boolean('local-server') ? [{id: LOCAL_ID, name: LOCAL_NAME, local: true}, ...remote] : remote;
 }
 
@@ -493,7 +494,17 @@ export class T3Server {
                 }
             });
             conn.connect('error', (_conn, error) => finish(reject, friendlyError(error)));
-            conn.connect('closed', () => finish(reject, new Unavailable('T3 closed the connection')));
+            conn.connect('closed', () => {
+                // 1002 (protocol error) and 1008 (policy violation) are refusals that
+                // need the user; any other close is T3 going away.
+                const code = conn.get_close_code();
+                if (code === 1002 || code === 1008) {
+                    const reason = conn.get_close_data();
+                    finish(reject, new T3Error(`T3 refused the connection (${code}${reason ? `: ${reason}` : ''})`));
+                } else {
+                    finish(reject, new Unavailable('T3 closed the connection'));
+                }
+            });
             conn.send_text(JSON.stringify({_tag: 'Request', id: '1', tag: method, payload: {}, headers: []}));
         });
     }

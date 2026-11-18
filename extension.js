@@ -126,7 +126,7 @@ export default class T3AiUsageExtension extends Extension {
         this._states = new Map();
         this._createServers(keptStates);
         keptStates = null;
-        this._accounts = [];
+        this._accounts = this._collectAccounts(this._servers);
         this._running = false;
 
         this._button = new PanelMenu.Button(0.0, this.metadata.name, false);
@@ -143,7 +143,7 @@ export default class T3AiUsageExtension extends Extension {
             this._settings.connect(`changed::${key}`, () => this._render()));
         for (const key of ['servers', 'local-server']) {
             this._settingsIds.push(this._settings.connect(`changed::${key}`, () => {
-                this._createServers();
+                this._createServers(this._keptStates());
                 this._render();
                 this._refresh();
             }));
@@ -165,9 +165,7 @@ export default class T3AiUsageExtension extends Extension {
         for (const id of this._settingsIds ?? [])
             this._settings.disconnect(id);
         this._settingsIds = null;
-        keptStates = new Map((this._servers ?? [])
-            .filter(server => this._states?.get(server.id)?.okSeconds)
-            .map(server => [server.id, {spec: JSON.stringify(server.spec), state: this._states.get(server.id)}]));
+        keptStates = this._keptStates();
         for (const server of this._servers ?? [])
             server.destroy();
         this._servers = null;
@@ -185,7 +183,15 @@ export default class T3AiUsageExtension extends Extension {
         this._states = null;
     }
 
-    // kept: the states saved by disable(), for servers whose settings did not change.
+    // Each server's last answer, for _createServers() to carry over to a server whose
+    // settings (address, name, sign-in) did not change.
+    _keptStates() {
+        return new Map((this._servers ?? [])
+            .filter(server => this._states?.get(server.id)?.okSeconds)
+            .map(server => [server.id, {spec: JSON.stringify(server.spec), state: this._states.get(server.id)}]));
+    }
+
+    // kept: from _keptStates(), across a settings change or a screen lock.
     _createServers(kept = null) {
         for (const server of this._servers ?? [])
             server.destroy();
@@ -195,8 +201,11 @@ export default class T3AiUsageExtension extends Extension {
         this._states.clear();
         for (const spec of specs) {
             const entry = kept?.get(spec.id);
-            if (entry && entry.spec === JSON.stringify(spec))
-                this._states.set(spec.id, entry.state);
+            if (entry && entry.spec === JSON.stringify(spec)) {
+                // The re-check throttle runs on a clock that stops during suspend, and
+                // after a lock the server may hold old data: it may be re-checked at once.
+                this._states.set(spec.id, {...entry.state, lastForced: 0});
+            }
         }
         this._running = false;
         this._forceQueued = false;
@@ -227,12 +236,16 @@ export default class T3AiUsageExtension extends Extension {
         await Promise.all(servers.map(server => this._updateServer(server, force)));
         if (!this._button || servers !== this._servers)
             return;
-        this._accounts = collectAccounts(servers
+        this._accounts = this._collectAccounts(servers);
+        this._recordAccounts(this._accounts);
+        this._render();
+    }
+
+    _collectAccounts(servers) {
+        return collectAccounts(servers
             .map(server => ({env: server, state: this._states.get(server.id)}))
             .filter(({state}) => state?.providers)
             .map(({env, state}) => ({env, providers: state.providers, accents: state.accents})));
-        this._recordAccounts(this._accounts);
-        this._render();
     }
 
     async _updateServer(server, force) {
