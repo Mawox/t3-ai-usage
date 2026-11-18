@@ -12,7 +12,7 @@ import {PACKAGE_VERSION} from 'resource:///org/gnome/shell/misc/config.js';
 import {T3Server, makeHttpSession, serverSpecs} from './t3client.js';
 import {
     PANEL_DEFAULT_DRIVERS, ago, applyOrder, bindingWindow, clockTime, collectAccounts,
-    compactReset, effectivePercent, isFable, level, pace, paceWarning, secondsSince, shortReset, windowId, windowKey,
+    compactReset, effectivePercent, isFable, level, pace, paceWarning, secondsSince, serverDown, shortReset, windowId, windowKey,
 } from './model.js';
 
 // GNOME 51 removed St.BoxLayout's `vertical` in favour of `orientation`.
@@ -244,6 +244,7 @@ export default class T3AiUsageExtension extends Extension {
             state.providers = providers;
             state.error = null;
             state.okAt = GLib.DateTime.new_now_local();
+            state.okMono = GLib.get_monotonic_time() / 1e6;
         } catch (e) {
             if (server !== this._servers?.find(s => s.id === server.id))
                 return;
@@ -314,9 +315,17 @@ export default class T3AiUsageExtension extends Extension {
         return this._accounts.length > 0;
     }
 
-    // Every server failed, or none is set up.
+    // The server has failed since it last answered, or never answered, for longer
+    // than the grace period.
+    _down(server) {
+        const state = this._states.get(server.id);
+        const sinceOk = state?.okMono ? GLib.get_monotonic_time() / 1e6 - state.okMono : null;
+        return serverDown(state?.error, sinceOk);
+    }
+
+    // Every server is down, or none is set up.
     _allFailed() {
-        return this._servers.every(server => this._states.get(server.id)?.error);
+        return this._servers.every(server => this._down(server));
     }
 
     _renderPanel(accounts, labels) {
@@ -451,8 +460,10 @@ export default class T3AiUsageExtension extends Extension {
         for (const server of this._servers) {
             const state = this._states.get(server.id);
             if (state?.error) {
-                const last = state.okAt ? `, last data ${state.okAt.format('%H:%M')}` : '';
-                note(`${server.name}: ${state.error}${last}`);
+                if (this._down(server)) {
+                    const last = state.okAt ? `, last data ${state.okAt.format('%H:%M')}` : '';
+                    note(`${server.name}: ${state.error}${last}`);
+                }
                 continue;
             }
             const left = server.expiresAt ? (Date.parse(server.expiresAt) - Date.now()) / 864e5 : Infinity;

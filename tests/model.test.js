@@ -107,6 +107,12 @@ equal(merged[0].accent, '#123456', 'keeps the accent colour');
 const order = model.applyOrder([{key: 'a'}, {key: 'b'}, {key: 'c'}], ['c', 'a']).map(x => x.key);
 equal(order, ['c', 'a', 'b'], 'saved order first, unknown keys after');
 
+equal(model.serverDown(null, null), false, 'a server that answered is up');
+equal(model.serverDown('T3 is not running', 2 * MIN), false, 'a failure soon after the last answer is not reported');
+equal(model.serverDown('T3 is not running', model.SERVER_GRACE_SECONDS), false, 'the grace period includes its end');
+equal(model.serverDown('T3 is not running', 6 * MIN), true, 'a failure past the grace period is reported');
+equal(model.serverDown('T3 is not running', null), true, 'a server that never answered is reported at once');
+
 print(`${count - failures} of ${count} passed`);
 if (failures)
     imports.system.exit(1);
