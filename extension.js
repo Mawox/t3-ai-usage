@@ -204,7 +204,7 @@ export default class T3AiUsageExtension extends Extension {
             if (entry && entry.spec === JSON.stringify(spec)) {
                 // The re-check throttle runs on a clock that stops during suspend, and
                 // after a lock the server may hold old data: it may be re-checked at once.
-                this._states.set(spec.id, {...entry.state, lastForced: 0});
+                this._states.set(spec.id, {...entry.state, lastForced: 0, observed: false});
             }
         }
         this._running = false;
@@ -237,7 +237,9 @@ export default class T3AiUsageExtension extends Extension {
         if (!this._button || servers !== this._servers)
             return;
         this._accounts = this._collectAccounts(servers);
-        this._recordAccounts(this._accounts);
+        // Only what servers reported in this poll counts as seen; restored or earlier
+        // answers are only shown.
+        this._recordAccounts(this._collectAccounts(servers.filter(s => this._states.get(s.id)?.observed)));
         this._render();
     }
 
@@ -255,10 +257,9 @@ export default class T3AiUsageExtension extends Extension {
             const snapshot = await server.call('server.getConfig');
             for (const [id, instance] of Object.entries(snapshot.settings?.providerInstances ?? {}))
                 state.accents[id] = instance?.accentColor ?? null;
-            let providers = snapshot.providers ?? [];
-            // Wall-clock time, so a suspend counts towards the grace period. A re-check
-            // that fails keeps the time of this answer.
-            let okSeconds = GLib.get_real_time() / 1e6;
+            const providers = snapshot.providers ?? [];
+            // Kept at once, so a lock during the re-check below keeps this answer.
+            this._answered(state, providers);
 
             const checked = providers.filter(p => p.enabled && p.usageLimits?.checkedAt);
             const newest = Math.min(...checked.map(p => secondsSince(p.usageLimits.checkedAt)));
@@ -266,18 +267,15 @@ export default class T3AiUsageExtension extends Extension {
             if (force || (newest > FORCE_REFRESH_SECONDS && now - state.lastForced > FORCE_REFRESH_SECONDS)) {
                 state.lastForced = now;
                 try {
-                    providers = (await server.call('server.refreshProviders')).providers ?? providers;
-                    okSeconds = GLib.get_real_time() / 1e6;
+                    const fresh = (await server.call('server.refreshProviders')).providers;
+                    if (fresh)
+                        this._answered(state, fresh);
                 } catch (e) {
                     // The snapshot from getConfig is still worth showing.
                     if (server === this._servers?.find(s => s.id === server.id))
                         console.warn(`T3 AI Usage: ${server.name}: re-check failed: ${e.message ?? e}`);
                 }
             }
-            state.providers = providers;
-            state.error = null;
-            state.okSeconds = okSeconds;
-            state.okAt = GLib.DateTime.new_from_unix_local(Math.floor(okSeconds));
         } catch (e) {
             if (server !== this._servers?.find(s => s.id === server.id))
                 return;
@@ -287,7 +285,19 @@ export default class T3AiUsageExtension extends Extension {
                 console.warn(`T3 AI Usage: ${server.name}: ${error}`);
             state.error = error;
             state.unavailable = e instanceof Unavailable;
+            state.observed = false;
         }
+    }
+
+    // The server answered with these providers. The time is wall-clock time, so a
+    // suspend counts towards the grace period; a failed re-check keeps it.
+    _answered(state, providers) {
+        state.providers = providers;
+        state.error = null;
+        state.unavailable = false;
+        state.observed = true;
+        state.okSeconds = GLib.get_real_time() / 1e6;
+        state.okAt = GLib.DateTime.new_from_unix_local(Math.floor(state.okSeconds));
     }
 
     // Remembers every account and its limit windows for the preferences window. Accounts
@@ -493,11 +503,9 @@ export default class T3AiUsageExtension extends Extension {
         const note = text => this._status.add_child(new St.Label({text, style_class: 't3-ai-usage-error'}));
         for (const server of this._servers) {
             const state = this._states.get(server.id);
-            if (state?.error) {
-                if (this._down(server)) {
-                    const last = state.okAt ? `, last data ${state.okAt.format('%H:%M')}` : '';
-                    note(`${server.name}: ${state.error}${last}`);
-                }
+            if (state?.error && this._down(server)) {
+                const last = state.okAt ? `, last data ${state.okAt.format('%H:%M')}` : '';
+                note(`${server.name}: ${state.error}${last}`);
                 continue;
             }
             const left = server.expiresAt ? (Date.parse(server.expiresAt) - Date.now()) / 864e5 : Infinity;

@@ -44,6 +44,11 @@ export class Unavailable extends T3Error {}
 // Statuses a proxy or server gives while T3 restarts or is overloaded. Others, such
 // as 511 (sign in to the network), need the user.
 const TRANSIENT_STATUSES = [500, 502, 503, 504];
+// WebSocket closes before the answer that mean T3 went away: none or no status
+// (0, 1005), normal or going away (1000, 1001), dropped (1006), internal error,
+// restart, try later, bad gateway (1011-1014). Others, such as 1002, 1003, 1007,
+// 1008 and 1009, refuse the request and need the user.
+const OUTAGE_CLOSE_CODES = [0, 1000, 1001, 1005, 1006, 1011, 1012, 1013, 1014];
 
 function isCancelled(e) {
     return e?.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED);
@@ -495,14 +500,12 @@ export class T3Server {
             });
             conn.connect('error', (_conn, error) => finish(reject, friendlyError(error)));
             conn.connect('closed', () => {
-                // 1002 (protocol error) and 1008 (policy violation) are refusals that
-                // need the user; any other close is T3 going away.
                 const code = conn.get_close_code();
-                if (code === 1002 || code === 1008) {
-                    const reason = conn.get_close_data();
-                    finish(reject, new T3Error(`T3 refused the connection (${code}${reason ? `: ${reason}` : ''})`));
-                } else {
+                if (OUTAGE_CLOSE_CODES.includes(code)) {
                     finish(reject, new Unavailable('T3 closed the connection'));
+                } else {
+                    const reason = conn.get_close_data();
+                    finish(reject, new T3Error(`T3 refused the request (${code}${reason ? `: ${reason}` : ''})`));
                 }
             });
             conn.send_text(JSON.stringify({_tag: 'Request', id: '1', tag: method, payload: {}, headers: []}));
