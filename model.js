@@ -72,14 +72,14 @@ function defaultRank(driver) {
 export function collectAccounts(snapshots) {
     const byKey = new Map();
     for (const {env, providers, accents} of snapshots) {
-        // Providers without an e-mail that share a driver and name on one server are
-        // told apart by their instance ids, all of them, so that no key passes to
-        // another provider when one goes. Counted over every switched-on provider.
+        // Providers without an e-mail that share a driver and name on one server go by
+        // their instance ids instead, all of them, so that no key passes to another
+        // provider when one goes. Counted over every switched-on provider.
         const switchedOn = (providers ?? []).filter(p => p.enabled);
         const plain = p => accountKey(p, p.displayName || p.instanceId);
         const keys = new Map(switchedOn.map(p => {
             const shared = !p.auth?.email && switchedOn.filter(x => !x.auth?.email && plain(x) === plain(p)).length > 1;
-            return [p.instanceId, shared ? `${plain(p)}:${p.instanceId}` : plain(p)];
+            return [p.instanceId, shared ? `${p.driver}:instance:${p.instanceId}` : plain(p)];
         }));
         for (const p of providers ?? []) {
             const limits = p.usageLimits;
@@ -214,8 +214,10 @@ export function reconcileAccounts(known, accounts, servers, providers, today) {
                 const exact = all.find(x => k.key === `${id}:${x.instanceId}` ||
                     (x.usageLimits?.credentialFingerprint && k.key === `${x.driver}:fp:${x.usageLimits.credentialFingerprint.slice(0, 16)}`));
                 const matches = all.filter(x => x.driver === k.driver && (x.displayName || x.instanceId) === k.name);
-                const p = exact ?? matches.find(x => emailOf(k) && x.auth?.email === emailOf(k)) ??
-                    matches.find(x => waiting(instanceKey(id, x.instanceId))) ?? matches[0];
+                // A key of the form `server id:instance id` names its provider or none.
+                const p = exact ?? (k.key.startsWith(`${id}:`) ? null
+                    : matches.find(x => emailOf(k) && x.auth?.email === emailOf(k)) ??
+                        matches.find(x => waiting(instanceKey(id, x.instanceId))) ?? matches[0]);
                 return p ? [instanceKey(id, p.instanceId)] : [];
             }),
         };

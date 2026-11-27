@@ -150,6 +150,8 @@ export default class T3AiUsageExtension extends Extension {
         this._panelStep = 0;
         this._panelWidths = [];
         this._panelTightest = false;
+        this._panelLimited = false;
+        this._panelFitRoom = Infinity;
         this._panelArgs = null;
         this._fitLater = 0;
         // Room in the top bar changes when another indicator, the clock or the screen does.
@@ -346,6 +348,8 @@ export default class T3AiUsageExtension extends Extension {
         const readable = Array.isArray(known);
         const complete = this._servers.every(server =>
             answered.includes(server) && this._states.get(server.id).providers?.length);
+        // A rebuilt list may still miss accounts T3 has no limits for yet.
+        const prunable = readable && complete;
         // A list that cannot be read is rebuilt from a poll in which every server
         // answered. That poll gives defaults only to accounts never ordered before.
         if (!readable && !complete)
@@ -362,7 +366,7 @@ export default class T3AiUsageExtension extends Extension {
             : result.hide.filter(entry => fresh.some(a => entry.startsWith(`${a.key}|`)));
 
         const keep = new Set(result.known.map(k => k.key));
-        const prune = keys => (complete ? keys.filter(key => keep.has(key)) : keys);
+        const prune = keys => (prunable ? keys.filter(key => keep.has(key)) : keys);
         // An account that follows another goes right after it; when that one is not in
         // the list, at the end if `always`.
         const follow = (list, always) => {
@@ -393,7 +397,7 @@ export default class T3AiUsageExtension extends Extension {
                 .map(entry => `${key}${entry.slice(before.length)}`)];
         }
         hidden = [...new Set([...hidden, ...firstHidden])];
-        save('hidden-windows', complete ? hidden.filter(entry => owner(entry)) : hidden);
+        save('hidden-windows', prunable ? hidden.filter(entry => owner(entry)) : hidden);
 
         const labels = this._settings.get_value('labels').deepUnpack();
         const nextLabels = {...labels};
@@ -402,7 +406,7 @@ export default class T3AiUsageExtension extends Extension {
                 nextLabels[key] = labels[before];
         }
         for (const key of Object.keys(nextLabels)) {
-            if (complete && !keep.has(key))
+            if (prunable && !keep.has(key))
                 delete nextLabels[key];
         }
         if (JSON.stringify(nextLabels) !== JSON.stringify(labels))
@@ -412,9 +416,9 @@ export default class T3AiUsageExtension extends Extension {
     _render() {
         if (!this._button)
             return;
-        // Servers that are off show nothing, not even their last numbers; the menu says
-        // they are off.
-        this._shown = applyOrder(this._collectAccounts(this._servers.filter(server => !this._off(server.id))),
+        // A server that is down shows nothing, not even its last numbers, so they cannot
+        // stand in for what another server reports now; the menu says why it is down.
+        this._shown = applyOrder(this._collectAccounts(this._servers.filter(server => !this._down(server))),
             this._settings.get_strv('account-order'));
         const ordered = this._shown;
         const labels = this._settings.get_value('labels').deepUnpack();
@@ -455,6 +459,7 @@ export default class T3AiUsageExtension extends Extension {
         // The width of each step tried, for _fitPanel().
         this._panelWidths = [];
         this._panelTightest = false;
+        this._panelFitRoom = room;
         let step = 0;
         let layout = PANEL_LAYOUTS[0];
         for (;;) {
@@ -484,6 +489,7 @@ export default class T3AiUsageExtension extends Extension {
             step++;
         }
         this._panelStep = step;
+        this._panelLimited = layout.limit !== undefined;
     }
 
     // The width the top bar can give the indicator, in physical pixels: GNOME gives
@@ -521,8 +527,11 @@ export default class T3AiUsageExtension extends Extension {
             return;
         const room = this._panelRoom();
         const spare = PANEL_SPARE * St.ThemeContext.get_for_stage(global.stage).scale_factor;
-        const roomier = this._panelStep > 0 &&
-            (room === Infinity || this._panelWidths[this._panelStep - 1] + spare <= room);
+        // With accounts left out, the step before may be several accounts wider than
+        // one more needs: any room gained to spare is worth a try.
+        const roomier = this._panelStep > 0 && (room === Infinity || (this._panelLimited
+            ? room >= this._panelFitRoom + spare
+            : this._panelWidths[this._panelStep - 1] + spare <= room));
         const tighter = room !== Infinity && !this._panelTightest &&
             this._button.container.get_preferred_width(-1)[1] > room;
         if (roomier || tighter)
