@@ -66,6 +66,13 @@ if [ "${1:-}" = --inside ]; then
     echo "prefs-window: $(ev "const w = global.display.focus_window; w ? [w.get_frame_rect().x, w.get_frame_rect().y, w.get_frame_rect().width, w.get_frame_rect().height, w.title].join(' ') : 'none'")" >> "$OUT/report.txt"
     shot "$OUT/prefs-full.png"
 
+    # Another extension's top-bar hook throws after adding the button, as Top Bar
+    # Organizer does next to a broken tray icon: the extension still comes up.
+    ev "const P = Main.panel; P._t3Original = P._addToPanelBox; P._addToPanelBox = function (...args) { P._t3Original.apply(this, args); throw new TypeError('hook failed'); }; 'ok'" > /dev/null
+    gnome-extensions disable "$UUID"; sleep 1; gnome-extensions enable "$UUID"; sleep 3
+    echo "hooked-enable: $(gnome-extensions info "$UUID" | grep -o 'State: .*') $(ev "Main.panel.statusArea['$UUID']?.container.get_parent() ? 'in the top bar' : 'missing'")" >> "$OUT/report.txt"
+    ev "const P = Main.panel; P._addToPanelBox = P._t3Original; delete P._t3Original; 'ok'" > /dev/null
+
     # T3 stops, and has not answered for longer than the grace period.
     kill "$MOCK_PID"
     ev "const e = Main.extensionManager.lookup('$UUID').stateObj; for (const s of e._states.values()) s.okSeconds -= 3600; e._refresh(true); 'ok'" > /dev/null

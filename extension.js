@@ -147,7 +147,15 @@ export default class T3AiUsageExtension extends Extension {
                 this._refresh();
         });
         this._buildMenu();
-        Main.panel.addToStatusArea(this.uuid, this._button);
+        try {
+            Main.panel.addToStatusArea(this.uuid, this._button);
+        } catch (e) {
+            // Another extension that hooks the top bar (such as Top Bar Organizer) may
+            // throw after the button is in place; only a button left out is fatal.
+            if (!this._button.container.get_parent())
+                throw e;
+            console.warn(`T3 AI Usage: another extension failed while the top bar added this one: ${e.message ?? e}`);
+        }
         this._panelStep = 0;
         this._panelWidths = [];
         this._panelTightest = false;
