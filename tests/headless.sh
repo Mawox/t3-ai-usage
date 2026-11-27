@@ -4,6 +4,13 @@
 #
 #   tests/headless.sh OUTPUT_DIR
 #   MONITOR=1728x420 tests/headless.sh OUTPUT_DIR   (a short screen: the menu scrolls)
+#   MONITOR=840x700 tests/headless.sh OUTPUT_DIR    (a narrow screen: the top bar tightens;
+#                                                    800x700 drops the times, 640x700 shows "+N")
+#
+# The saved settings start with two accounts from older versions: Codex under an
+# old key, with a label, a hidden limit and a top-bar switch, which the new key
+# takes over, and a Claude account T3 no longer runs, which is dropped. At the end
+# the mock T3 stops, and the top bar and the menu say T3 is off.
 #
 # Needs gnome-shell, gjs, dbus-run-session and python3-gi. Nothing outside a
 # temporary directory is touched: HOME, the XDG directories and GSettings all
@@ -34,6 +41,9 @@ if [ "${1:-}" = --inside ]; then
         ev "Main.overview.hide(); Main.messageTray._bannerBin?.hide(); 'ok'" > /dev/null
         sleep 2
         echo "panel: $(ev "Main.panel.statusArea['$UUID'].get_children()[0].get_children().map(b => b.get_children().map(x => x.text ?? 'ring').join(' ')).join(' | ')")"
+        # Layout chosen, width given and wanted, and whether GNOME shortened any label.
+        echo "panel-fit: $(ev "const e = Main.extensionManager.lookup('$UUID').stateObj; const c = Main.panel.statusArea['$UUID'].container; const labels = []; const walk = a => { if (a instanceof imports.gi.St.Label) labels.push(a); a.get_children().forEach(walk); }; walk(c); ['step ' + e._panelStep + ' (room ' + Math.round(e._panelRoom()) + ', tried ' + e._panelWidths.join('/') + ')', Math.round(c.get_allocation_box().get_width()) + ' of ' + Math.round(c.get_preferred_width(-1)[1]), labels.some(l => l.clutter_text.get_layout().is_ellipsized()) ? 'shortened' : 'whole'].join(', ')")"
+        echo "settings: $(ev "const s = Main.extensionManager.lookup('$UUID').stateObj._settings; JSON.stringify({known: JSON.parse(s.get_string('known-accounts')).map(k => k.key), order: s.get_strv('account-order'), panel: s.get_strv('panel-accounts'), labels: s.get_value('labels').deepUnpack(), hidden: s.get_strv('hidden-windows')})")"
         ev "Main.panel.statusArea['$UUID'].menu.open(); 'ok'" > /dev/null
         sleep 2
         echo "menu: $(ev "const out = []; const walk = a => { if (a instanceof imports.gi.St.Label && a.text) out.push(a.text); a.get_children?.().forEach(walk); }; walk(Main.panel.statusArea['$UUID'].menu.box); out.join(' / ')")"
@@ -55,6 +65,20 @@ if [ "${1:-}" = --inside ]; then
     sleep 2
     echo "prefs-window: $(ev "const w = global.display.focus_window; w ? [w.get_frame_rect().x, w.get_frame_rect().y, w.get_frame_rect().width, w.get_frame_rect().height, w.title].join(' ') : 'none'")" >> "$OUT/report.txt"
     shot "$OUT/prefs-full.png"
+
+    # Another extension's top-bar hook throws after adding the button, as Top Bar
+    # Organizer does next to a broken tray icon: the extension still comes up.
+    ev "const P = Main.panel; P._t3Original = P._addToPanelBox; P._addToPanelBox = function (...args) { P._t3Original.apply(this, args); throw new TypeError('hook failed'); }; 'ok'" > /dev/null
+    gnome-extensions disable "$UUID"; sleep 1; gnome-extensions enable "$UUID"; sleep 3
+    echo "hooked-enable: $(gnome-extensions info "$UUID" | grep -o 'State: .*') $(ev "Main.panel.statusArea['$UUID']?.container.get_parent() ? 'in the top bar' : 'missing'")" >> "$OUT/report.txt"
+    ev "const P = Main.panel; P._addToPanelBox = P._t3Original; delete P._t3Original; 'ok'" > /dev/null
+
+    # T3 stops, and has not answered for longer than the grace period.
+    kill "$MOCK_PID"
+    ev "const e = Main.extensionManager.lookup('$UUID').stateObj; for (const s of e._states.values()) s.okSeconds -= 3600; e._refresh(true); 'ok'" > /dev/null
+    sleep 4
+    echo "off-panel: $(ev "Main.panel.statusArea['$UUID'].get_children()[0].get_children().map(x => x.text ?? 'box').join(' | ')")" >> "$OUT/report.txt"
+    echo "off-menu: $(ev "const out = []; const walk = a => { if (a instanceof imports.gi.St.Label && a.text) out.push(a.text); a.get_children?.().forEach(walk); }; walk(Main.panel.statusArea['$UUID'].menu.box); out.join(' / ')")" >> "$OUT/report.txt"
     kill "$shell"
     wait "$shell" 2> /dev/null || true
     [ -n "${system_bus:-}" ] && kill "$system_bus"
@@ -83,11 +107,20 @@ cat > "$XDG_CONFIG_HOME/glib-2.0/settings/keyfile" << KEYS
 enabled-extensions=['unsafe-helper@t3-ai-usage.test', '$UUID']
 disable-user-extensions=false
 welcome-dialog-last-shown-version='999'
+
+[org/gnome/shell/extensions/t3-ai-usage]
+known-accounts='[{"key":"codex:fp:0123456789abcdef","name":"Codex","driver":"codex","plan":"ChatGPT Pro","sources":["This computer"],"lastSeen":"$(date -d '-3 days' +%F)","windows":[{"id":"primary","label":"Session"}]},{"key":"claudeAgent:old@example.com","name":"Claude Old","driver":"claudeAgent","plan":"Claude Pro","sources":["This computer"],"lastSeen":"$(date -d '-2 days' +%F)","windows":[]}]'
+account-order=['codex:fp:0123456789abcdef', 'claudeAgent:old@example.com']
+panel-accounts=['codex:fp:0123456789abcdef', 'claudeAgent:old@example.com']
+labels={'codex:fp:0123456789abcdef': 'Gx', 'claudeAgent:old@example.com': 'Co'}
+hidden-windows=['codex:fp:0123456789abcdef|primary']
 KEYS
 
 gjs -m "$REPO/tests/mock-t3.js" --port 3999 --base-dir "$HOME/.t3" > "$OUT/mock.log" 2>&1 &
 mock=$!
-trap 'kill $mock 2> /dev/null; rm -rf "$WORK"' EXIT
+export MOCK_PID=$mock
+# The mock may have stopped already: the test stops it to see T3 off.
+trap 'kill $mock 2> /dev/null || true; rm -rf "$WORK"' EXIT
 dbus-run-session -- "$0" --inside "$OUT"
 
 python3 - "$OUT" << 'PY'

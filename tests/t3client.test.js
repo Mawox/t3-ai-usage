@@ -134,9 +134,25 @@ try {
         await failsAs(new t3.T3Server(spec, http).call('server.getConfig'), unavailable,
             `HTTP ${status} to the ticket request ${unavailable ? 'is' : 'is not'} a server that did not answer`);
     }
+    // A proxy that says T3 is down means T3 is off; HTTP 500 means it answered but failed.
+    for (const [status, reason] of [[500, 'failing'], [502, 'off']]) {
+        const spec = {id: `reason-${status}`, name: 'status', url: URL};
+        await t3.writeToken(spec.id, {token: `fail-${status}`, expiresAt: future});
+        await new t3.T3Server(spec, http).call('server.getConfig').then(() => check(false, `HTTP ${status} fails`),
+            e => check(e.reason === reason, `HTTP ${status} to the ticket request: ${reason}`, e.message));
+    }
     await t3.writeToken('closed', {token: 'remote-demo-token', expiresAt: future});
     await failsAs(new t3.T3Server({id: 'closed', name: 'closed', url: 'http://127.0.0.1:1'}, http)
         .call('server.getConfig'), true, 'a refused connection is a server that did not answer');
+    await new t3.T3Server({id: 'closed', name: 'closed', url: 'http://127.0.0.1:1'}, http).call('server.getConfig')
+        .then(() => check(false, 'a refused connection fails'),
+            e => check(e.reason === 'off', 'a refused connection means T3 is off', e.message));
+    // Without a proxy, which would answer for the unknown host itself.
+    const direct = t3.makeHttpSession();
+    direct.set_proxy_resolver(null);
+    await new t3.T3Server({id: 'closed', name: 'closed', url: 'http://t3-ai-usage.invalid'}, direct).call('server.getConfig')
+        .then(() => check(false, 'an unknown host fails'),
+            e => check(e instanceof t3.Unavailable && e.reason === 'network', 'an unknown host is out of reach', e.message));
     const runtime = Gio.File.new_for_path(`${work}/.t3/userdata/server-runtime.json`);
     await t3.writeToken('local', {token: 'local-demo-token', expiresAt: future});
     runtime.replace_contents(new TextEncoder().encode('{not json'), null, false, Gio.FileCreateFlags.NONE, null);
