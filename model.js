@@ -72,9 +72,16 @@ function defaultRank(driver) {
 export function collectAccounts(snapshots) {
     const byKey = new Map();
     for (const {env, providers, accents} of snapshots) {
-        // Keys of accounts without an e-mail on this server, by instance: two providers
-        // of one driver and name on one server are two accounts.
-        const named = new Map();
+        // A second provider of one driver and name on one server, without an e-mail, is
+        // another account: its key gets the instance id. Keys are given over every
+        // switched-on provider, so none moves to another while one has no limits.
+        const keys = new Map();
+        for (const p of providers ?? []) {
+            if (!p.enabled)
+                continue;
+            const key = accountKey(p, p.displayName || p.instanceId);
+            keys.set(p.instanceId, !p.auth?.email && [...keys.values()].includes(key) ? `${key}:${p.instanceId}` : key);
+        }
         for (const p of providers ?? []) {
             const limits = p.usageLimits;
             if (!p.enabled || !limits || limits.unavailable?.reason === 'unsupported')
@@ -82,14 +89,8 @@ export function collectAccounts(snapshots) {
             if (!limits.unavailable && !(limits.windows?.length))
                 continue;
             const name = p.displayName || p.instanceId;
-            let key = accountKey(p, name);
-            if (!p.auth?.email) {
-                if (named.has(key) && named.get(key) !== p.instanceId)
-                    key = `${key}:${p.instanceId}`;
-                named.set(key, p.instanceId);
-            }
             const account = {
-                key,
+                key: keys.get(p.instanceId),
                 driver: p.driver,
                 email: p.auth?.email ?? null,
                 name,
@@ -173,10 +174,15 @@ export function reconcileAccounts(known, accounts, servers, providers, today) {
     };
     const current = new Map(accounts.map(a => [a.key, a]));
     const reported = new Set(accounts.flatMap(a => a.instances));
+    // T3 runs the provider but reports no account from it yet.
+    const waiting = instance => {
+        const [id, instanceId] = splitInstance(instance);
+        return Boolean(enabled.get(id)?.has(instanceId)) && !reported.has(instance);
+    };
 
     // Entries saved before 1.3 name their servers but not the provider: it is the one
-    // with the same driver and name, found once the server answers. A server name
-    // that several servers share stands for each of them.
+    // with the same driver and name (and e-mail, when several match), found once the
+    // server answers. A server name that several servers share stands for each.
     const resolve = k => {
         const instances = Array.isArray(k.instances)
             ? k.instances
@@ -188,8 +194,10 @@ export function reconcileAccounts(known, accounts, servers, providers, today) {
                 const [id, instanceId] = splitInstance(instance);
                 if (instanceId !== UNKNOWN_INSTANCE || !enabled.has(id))
                     return [instance];
-                const p = [...enabled.get(id).values()]
-                    .find(x => x.driver === k.driver && (x.displayName || x.instanceId) === k.name);
+                const matches = [...enabled.get(id).values()]
+                    .filter(x => x.driver === k.driver && (x.displayName || x.instanceId) === k.name);
+                const p = matches.find(x => emailOf(k) && x.auth?.email === emailOf(k)) ??
+                    matches.find(x => waiting(instanceKey(id, x.instanceId))) ?? matches[0];
                 return p ? [instanceKey(id, p.instanceId)] : [];
             }),
         };
@@ -206,8 +214,7 @@ export function reconcileAccounts(known, accounts, servers, providers, today) {
     const holder = new Map();
     for (const k of [...absent].sort(latestFirst)) {
         for (const instance of k.instances) {
-            const [id, instanceId] = splitInstance(instance);
-            if (enabled.get(id)?.has(instanceId) && !reported.has(instance) && !holder.has(instance))
+            if (waiting(instance) && !holder.has(instance))
                 holder.set(instance, k);
         }
     }
@@ -235,8 +242,9 @@ export function reconcileAccounts(known, accounts, servers, providers, today) {
             if (isFable(w) && !seen.some(b => b.id === windowId(w)))
                 hide.push(windowKey(a.key, windowId(w)));
         }
-        // Servers that did not answer this time still run it as far as is known.
-        const elsewhere = (before?.instances ?? []).filter(i => unanswered(i) && !a.instances.includes(i));
+        // Providers that did not report this time may still run it: their server did not
+        // answer, or T3 there has no limits for it yet.
+        const elsewhere = (before?.instances ?? []).filter(i => !a.instances.includes(i) && (unanswered(i) || waiting(i)));
         const elsewhereNames = servers.filter(s => elsewhere.some(i => splitInstance(i)[0] === s.id)).map(s => s.name);
         return {
             key: a.key, name: a.name, driver: a.driver, email: a.email, plan: a.plan, defaultLabel: a.defaultLabel,

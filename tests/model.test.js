@@ -202,6 +202,23 @@ const twins = model.collectAccounts([{env: servers[0], providers: [noEmail('agA'
 equal(twins.map(a => a.key), ['antigravity:name:Antigravity', 'antigravity:name:Antigravity:agB'],
     'two providers of one name on one server stay two accounts');
 
+const pending = {...noEmail('agA', 'x'), usageLimits: null};
+equal(model.collectAccounts([{env: servers[0], providers: [pending, noEmail('agB', 'y')]}]).map(a => a.key),
+    ['antigravity:name:Antigravity:agB'], 'a second provider keeps its key while the first has no limits');
+
+const hubWaiting = new Map([['local', answered2.get('local')],
+    ['hub', answered2.get('hub').map(x => (x.instanceId === 'codex' ? {...x, usageLimits: null} : x))]]);
+const nowWaiting = model.collectAccounts([...hubWaiting].map(([id, list]) => ({env: servers.find(x => x.id === id), providers: list})));
+equal(model.reconcileAccounts(second.known, nowWaiting, servers, hubWaiting, TODAY).known
+    .find(k => k.key === 'codex:a@x:ws1').instances, ['local|codex', 'hub|codex'],
+'a provider T3 runs without limits yet stays with the account');
+
+const twoClaudes = [p('claude_1', 'claudeAgent', 'Claude', 'a@x'), {...p('claude_2', 'claudeAgent', 'Claude', 'b@x'), usageLimits: null}];
+const resolved = model.reconcileAccounts([legacy('claudeAgent:b@x', 'Claude', 'claudeAgent', ['This computer'], '2026-11-20')],
+    model.collectAccounts([{env: servers[0], providers: twoClaudes}]), servers, new Map([['local', twoClaudes]]), TODAY);
+equal(resolved.known.find(k => k.key === 'claudeAgent:b@x')?.instances, ['local|claude_2'],
+    'an old entry finds its provider by e-mail among providers of the same name');
+
 const sameDay = model.reconcileAccounts([
     legacy('antigravity:fp:older', 'Antigravity', 'antigravity', ['hub'], '2026-11-26', [{id: 'a', label: 'a'}]),
     legacy('antigravity:fp:newer', 'Antigravity', 'antigravity', ['hub'], '2026-11-26', [{id: 'b', label: 'b'}]),

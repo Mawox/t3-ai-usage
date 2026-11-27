@@ -135,7 +135,7 @@ export default class T3AiUsageExtension extends Extension {
         this._states = new Map();
         this._createServers(keptStates);
         keptStates = null;
-        this._accounts = this._collectAccounts(this._servers);
+        this._shown = [];
         this._running = false;
 
         this._button = new PanelMenu.Button(0.0, this.metadata.name, false);
@@ -148,7 +148,8 @@ export default class T3AiUsageExtension extends Extension {
         this._buildMenu();
         Main.panel.addToStatusArea(this.uuid, this._button);
         this._panelStep = 0;
-        this._panelFitRoom = null;
+        this._panelWidths = [];
+        this._panelTightest = false;
         this._panelArgs = null;
         this._fitLater = 0;
         // Room in the top bar changes when another indicator, the clock or the screen does.
@@ -203,7 +204,7 @@ export default class T3AiUsageExtension extends Extension {
         this._status = null;
         this._updated = null;
         this._settings = null;
-        this._accounts = [];
+        this._shown = [];
         this._states = null;
     }
 
@@ -260,7 +261,6 @@ export default class T3AiUsageExtension extends Extension {
         await Promise.all(servers.map(server => this._updateServer(server, force)));
         if (!this._button || servers !== this._servers)
             return;
-        this._accounts = this._collectAccounts(servers);
         // Only what servers reported in this poll counts as seen; restored or earlier
         // answers are only shown.
         const answered = servers.filter(s => this._states.get(s.id)?.observed);
@@ -333,6 +333,9 @@ export default class T3AiUsageExtension extends Extension {
     // top bar); one that follows an account under a new key takes over its settings.
     // answered: the servers that answered in this poll.
     _recordAccounts(accounts, answered) {
+        // With no server set up, nothing can be told about any account.
+        if (!this._servers.length)
+            return;
         let known = null;
         try {
             known = JSON.parse(this._settings.get_string('known-accounts'));
@@ -341,13 +344,20 @@ export default class T3AiUsageExtension extends Extension {
         // could be read and every server answered: otherwise an account the list
         // does not have may still run on a server that did not answer.
         const readable = Array.isArray(known);
-        const complete = readable && this._servers.every(server => answered.includes(server));
+        const complete = this._servers.every(server =>
+            answered.includes(server) && this._states.get(server.id).providers?.length);
+        // A list that cannot be read is rebuilt from a poll in which every server
+        // answered, and that poll changes no other setting.
+        if (!readable && !complete)
+            return;
         const providers = new Map(answered.map(server => [server.id, this._states.get(server.id).providers]));
         const today = GLib.DateTime.new_now_local().format('%F');
         const result = reconcileAccounts(readable ? known : [], accounts, this._servers, providers, today);
         const next = JSON.stringify(result.known);
         if (next !== this._settings.get_string('known-accounts'))
             this._settings.set_string('known-accounts', next);
+        if (!readable)
+            return;
 
         const keep = new Set(result.known.map(k => k.key));
         const prune = keys => (complete ? keys.filter(key => keep.has(key)) : keys);
@@ -400,16 +410,18 @@ export default class T3AiUsageExtension extends Extension {
     _render() {
         if (!this._button)
             return;
-        // Accounts only on servers that are off are left out; the menu says the server is off.
-        const ordered = applyOrder(this._accounts.filter(a => !a.serverIds.every(id => this._off(id))),
+        // Servers that are off show nothing, not even their last numbers; the menu says
+        // they are off.
+        this._shown = applyOrder(this._collectAccounts(this._servers.filter(server => !this._off(server.id))),
             this._settings.get_strv('account-order'));
+        const ordered = this._shown;
         const labels = this._settings.get_value('labels').deepUnpack();
         this._renderPanel(ordered, labels);
         this._renderMenu(ordered);
     }
 
     _hasData() {
-        return this._accounts.length > 0;
+        return this._shown.length > 0;
     }
 
     // The server has failed since it last answered, or never answered, for longer
@@ -437,21 +449,28 @@ export default class T3AiUsageExtension extends Extension {
     _renderPanel(accounts, labels) {
         this._panelArgs = [accounts, labels];
         const room = this._panelRoom();
-        this._panelFitRoom = room;
         const spare = PANEL_SPARE * St.ThemeContext.get_for_stage(global.stage).scale_factor;
+        // The width of each step tried, for _fitPanel().
+        this._panelWidths = [];
+        this._panelTightest = false;
         let step = 0;
         let layout = PANEL_LAYOUTS[0];
         for (;;) {
             const shown = this._buildPanel(accounts, labels, layout);
+            if (room === Infinity)
+                break;
             const [, width] = this._button.container.get_preferred_width(-1);
-            if (room === Infinity || width + (step < this._panelStep ? spare : 0) <= room)
+            this._panelWidths[step] = width;
+            if (width + (step < this._panelStep ? spare : 0) <= room)
                 break;
-            if (step + 1 < PANEL_LAYOUTS.length)
+            if (step + 1 < PANEL_LAYOUTS.length) {
                 layout = PANEL_LAYOUTS[step + 1];
-            else if (shown > 1)
+            } else if (shown > 1) {
                 layout = {...layout, limit: shown - 1};
-            else
+            } else {
+                this._panelTightest = true;
                 break;
+            }
             step++;
         }
         this._panelStep = step;
@@ -485,16 +504,18 @@ export default class T3AiUsageExtension extends Extension {
         });
     }
 
-    // Lays the top bar out again when it no longer fits, or when it has more room than
-    // when it was laid out in a tighter layout.
+    // Lays the top bar out again when it no longer fits and a tighter step is left, or
+    // when the step before it now fits with room to spare.
     _fitPanel() {
         if (!this._button || !this._panelArgs)
             return;
         const room = this._panelRoom();
-        if (room === this._panelFitRoom)
-            return;
-        const [, width] = this._button.container.get_preferred_width(-1);
-        if (width > room || (this._panelStep > 0 && room > this._panelFitRoom))
+        const spare = PANEL_SPARE * St.ThemeContext.get_for_stage(global.stage).scale_factor;
+        const roomier = this._panelStep > 0 &&
+            (room === Infinity || this._panelWidths[this._panelStep - 1] + spare <= room);
+        const tighter = room !== Infinity && !this._panelTightest &&
+            this._button.container.get_preferred_width(-1)[1] > room;
+        if (roomier || tighter)
             this._renderPanel(...this._panelArgs);
     }
 
