@@ -4,7 +4,8 @@
 #
 #   tests/headless.sh OUTPUT_DIR
 #   MONITOR=1728x420 tests/headless.sh OUTPUT_DIR   (a short screen: the menu scrolls)
-#   MONITOR=900x700 tests/headless.sh OUTPUT_DIR    (a narrow screen: the top bar tightens)
+#   MONITOR=840x700 tests/headless.sh OUTPUT_DIR    (a narrow screen: the top bar tightens;
+#                                                    800x700 drops the times, 640x700 shows "+N")
 #
 # The saved settings start with two accounts from older versions: Codex under an
 # old key, with a label, a hidden limit and a top-bar switch, which the new key
@@ -41,7 +42,7 @@ if [ "${1:-}" = --inside ]; then
         sleep 2
         echo "panel: $(ev "Main.panel.statusArea['$UUID'].get_children()[0].get_children().map(b => b.get_children().map(x => x.text ?? 'ring').join(' ')).join(' | ')")"
         # Layout chosen, width given and wanted, and whether GNOME shortened any label.
-        echo "panel-fit: $(ev "const e = Main.extensionManager.lookup('$UUID').stateObj; const c = Main.panel.statusArea['$UUID'].container; const labels = []; const walk = a => { if (a instanceof imports.gi.St.Label) labels.push(a); a.get_children().forEach(walk); }; walk(c); ['layout ' + e._panelLayout + ' (room ' + Math.round(e._panelRoom()) + ', tried ' + e._panelWidths.join('/') + ')', Math.round(c.get_allocation_box().get_width()) + ' of ' + Math.round(c.get_preferred_width(-1)[1]), labels.some(l => l.clutter_text.get_layout().is_ellipsized()) ? 'shortened' : 'whole'].join(', ')")"
+        echo "panel-fit: $(ev "const e = Main.extensionManager.lookup('$UUID').stateObj; const c = Main.panel.statusArea['$UUID'].container; const labels = []; const walk = a => { if (a instanceof imports.gi.St.Label) labels.push(a); a.get_children().forEach(walk); }; walk(c); ['step ' + e._panelStep + ' (room ' + Math.round(e._panelRoom()) + ')', Math.round(c.get_allocation_box().get_width()) + ' of ' + Math.round(c.get_preferred_width(-1)[1]), labels.some(l => l.clutter_text.get_layout().is_ellipsized()) ? 'shortened' : 'whole'].join(', ')")"
         echo "settings: $(ev "const s = Main.extensionManager.lookup('$UUID').stateObj._settings; JSON.stringify({known: JSON.parse(s.get_string('known-accounts')).map(k => k.key), order: s.get_strv('account-order'), panel: s.get_strv('panel-accounts'), labels: s.get_value('labels').deepUnpack(), hidden: s.get_strv('hidden-windows')})")"
         ev "Main.panel.statusArea['$UUID'].menu.open(); 'ok'" > /dev/null
         sleep 2
@@ -111,7 +112,8 @@ KEYS
 gjs -m "$REPO/tests/mock-t3.js" --port 3999 --base-dir "$HOME/.t3" > "$OUT/mock.log" 2>&1 &
 mock=$!
 export MOCK_PID=$mock
-trap 'kill $mock 2> /dev/null; rm -rf "$WORK"' EXIT
+# The mock may have stopped already: the test stops it to see T3 off.
+trap 'kill $mock 2> /dev/null || true; rm -rf "$WORK"' EXIT
 dbus-run-session -- "$0" --inside "$OUT"
 
 python3 - "$OUT" << 'PY'

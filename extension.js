@@ -40,8 +40,9 @@ const EXPIRY_WARNING_DAYS = 7;
 const COLUMNS = 4;
 
 // Top-bar layouts, from the roomiest. When the accounts do not fit beside the other
-// indicators, the spacing tightens, then the text after each ring goes; otherwise
-// GNOME would shorten the labels to "…".
+// indicators, the spacing tightens, then the text after each ring goes, then
+// accounts at the end give way to "+N"; otherwise GNOME would shorten the labels
+// to "…".
 const PANEL_LAYOUTS = [{tight: false, text: true}, {tight: true, text: true}, {tight: true, text: false}];
 // A roomier layout comes back only with this much room to spare (logical pixels), so
 // that a clock changing width does not switch it back and forth.
@@ -146,8 +147,8 @@ export default class T3AiUsageExtension extends Extension {
         });
         this._buildMenu();
         Main.panel.addToStatusArea(this.uuid, this._button);
-        this._panelLayout = 0;
-        this._panelWidths = [];
+        this._panelStep = 0;
+        this._panelFitRoom = null;
         this._panelArgs = null;
         this._fitLater = 0;
         // Room in the top bar changes when another indicator, the clock or the screen does.
@@ -336,8 +337,11 @@ export default class T3AiUsageExtension extends Extension {
         try {
             known = JSON.parse(this._settings.get_string('known-accounts'));
         } catch {}
-        // A saved list that cannot be read is replaced, but forgets no settings.
+        // Settings of accounts no longer remembered are dropped only when the saved list
+        // could be read and every server answered: otherwise an account the list
+        // does not have may still run on a server that did not answer.
         const readable = Array.isArray(known);
+        const complete = readable && this._servers.every(server => answered.includes(server));
         const providers = new Map(answered.map(server => [server.id, this._states.get(server.id).providers]));
         const today = GLib.DateTime.new_now_local().format('%F');
         const result = reconcileAccounts(readable ? known : [], accounts, this._servers, providers, today);
@@ -346,7 +350,7 @@ export default class T3AiUsageExtension extends Extension {
             this._settings.set_string('known-accounts', next);
 
         const keep = new Set(result.known.map(k => k.key));
-        const prune = keys => (readable ? keys.filter(key => keep.has(key)) : keys);
+        const prune = keys => (complete ? keys.filter(key => keep.has(key)) : keys);
         // An account that follows another goes right after it; when that one is not in
         // the list, at the end if `always`.
         const follow = (list, always) => {
@@ -377,7 +381,7 @@ export default class T3AiUsageExtension extends Extension {
                 .map(entry => `${key}${entry.slice(before.length)}`)];
         }
         hidden = [...new Set([...hidden, ...result.hide])];
-        save('hidden-windows', readable ? hidden.filter(entry => owner(entry)) : hidden);
+        save('hidden-windows', complete ? hidden.filter(entry => owner(entry)) : hidden);
 
         const labels = this._settings.get_value('labels').deepUnpack();
         const nextLabels = {...labels};
@@ -386,7 +390,7 @@ export default class T3AiUsageExtension extends Extension {
                 nextLabels[key] = labels[before];
         }
         for (const key of Object.keys(nextLabels)) {
-            if (readable && !keep.has(key))
+            if (complete && !keep.has(key))
                 delete nextLabels[key];
         }
         if (JSON.stringify(nextLabels) !== JSON.stringify(labels))
@@ -428,23 +432,29 @@ export default class T3AiUsageExtension extends Extension {
         return !server || (this._down(server) && this._states.get(id).unavailable);
     }
 
-    // Builds the top bar in the roomiest layout that fits.
+    // Builds the top bar in the roomiest layout that fits: the layouts in order, then
+    // the last one with fewer accounts and a "+N" for the rest, down to one account.
     _renderPanel(accounts, labels) {
         this._panelArgs = [accounts, labels];
         const room = this._panelRoom();
+        this._panelFitRoom = room;
         const spare = PANEL_SPARE * St.ThemeContext.get_for_stage(global.stage).scale_factor;
-        this._panelWidths = [];
-        let layout = 0;
-        for (; ; layout++) {
-            this._buildPanel(accounts, labels, PANEL_LAYOUTS[layout]);
-            if (layout === PANEL_LAYOUTS.length - 1 || room === Infinity)
-                break;
+        let step = 0;
+        let layout = PANEL_LAYOUTS[0];
+        for (;;) {
+            const shown = this._buildPanel(accounts, labels, layout);
             const [, width] = this._button.container.get_preferred_width(-1);
-            this._panelWidths[layout] = width;
-            if (width + (layout < this._panelLayout ? spare : 0) <= room)
+            if (room === Infinity || width + (step < this._panelStep ? spare : 0) <= room)
                 break;
+            if (step + 1 < PANEL_LAYOUTS.length)
+                layout = PANEL_LAYOUTS[step + 1];
+            else if (shown > 1)
+                layout = {...layout, limit: shown - 1};
+            else
+                break;
+            step++;
         }
-        this._panelLayout = layout;
+        this._panelStep = step;
     }
 
     // The width the top bar can give the indicator, in physical pixels: GNOME gives
@@ -475,19 +485,20 @@ export default class T3AiUsageExtension extends Extension {
         });
     }
 
-    // Changes the layout when the room in the top bar changed enough.
+    // Lays the top bar out again when it no longer fits, or when it has more room than
+    // when it was laid out in a tighter layout.
     _fitPanel() {
         if (!this._button || !this._panelArgs)
             return;
         const room = this._panelRoom();
-        const spare = PANEL_SPARE * St.ThemeContext.get_for_stage(global.stage).scale_factor;
+        if (room === this._panelFitRoom)
+            return;
         const [, width] = this._button.container.get_preferred_width(-1);
-        const tighter = this._panelLayout < PANEL_LAYOUTS.length - 1 && width > room;
-        const roomier = this._panelLayout > 0 && this._panelWidths[this._panelLayout - 1] + spare <= room;
-        if (tighter || roomier)
+        if (width > room || (this._panelStep > 0 && room > this._panelFitRoom))
             this._renderPanel(...this._panelArgs);
     }
 
+    // Returns the number of accounts shown.
     _buildPanel(accounts, labels, layout) {
         this._panelBox.destroy_all_children();
         this._panelBox.style_class = layout.tight ? 't3-ai-usage-panel t3-ai-usage-panel-tight' : 't3-ai-usage-panel';
@@ -500,14 +511,25 @@ export default class T3AiUsageExtension extends Extension {
                 y_align: Clutter.ActorAlign.CENTER,
                 style_class: off ? 't3-ai-usage-dim' : failed ? 't3-ai-usage-error' : null,
             }));
-            return;
+            return 0;
         }
         const panel = new Set(this._settings.get_strv('panel-accounts'));
         const showLabel = this._settings.get_boolean('show-label');
         const showPercent = this._settings.get_boolean('show-percent');
         const resetMode = this._settings.get_string('reset-mode');
         const round = this._settings.get_boolean('round-times');
+        let shown = 0;
+        let more = 0;
         for (const account of accounts.filter(a => panel.has(a.key))) {
+            const windows = this._windows(account);
+            // Every limit of the account is hidden in the preferences.
+            if (this._usable(account) && !windows.length)
+                continue;
+            if (shown >= (layout.limit ?? Infinity)) {
+                more++;
+                continue;
+            }
+            shown++;
             const box = new St.BoxLayout({
                 style_class: layout.tight ? 't3-ai-usage-account t3-ai-usage-account-tight' : 't3-ai-usage-account',
                 y_align: Clutter.ActorAlign.CENTER,
@@ -522,10 +544,6 @@ export default class T3AiUsageExtension extends Extension {
                     label.set_style(`color: ${account.accent};`);
                 box.add_child(label);
             }
-            const windows = this._windows(account);
-            // Every limit of the account is hidden in the preferences.
-            if (this._usable(account) && !windows.length)
-                continue;
             const binding = this._usable(account) ? bindingWindow(windows) : null;
             box.add_child(makeRing(binding ? binding.pct : null));
 
@@ -545,9 +563,16 @@ export default class T3AiUsageExtension extends Extension {
             }
             this._panelBox.add_child(box);
         }
+        // The accounts left out are in the menu.
+        if (more) {
+            this._panelBox.add_child(new St.Label({
+                text: `+${more}`, y_align: Clutter.ActorAlign.CENTER, style_class: 't3-ai-usage-dim',
+            }));
+        }
         // No account is chosen for the top bar: keep something to click.
         if (!this._panelBox.get_n_children())
             this._panelBox.add_child(new St.Label({text: 'AI', y_align: Clutter.ActorAlign.CENTER}));
+        return shown;
     }
 
     _usable(account) {

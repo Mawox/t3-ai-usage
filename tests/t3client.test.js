@@ -140,7 +140,10 @@ try {
     await new t3.T3Server({id: 'closed', name: 'closed', url: 'http://127.0.0.1:1'}, http).call('server.getConfig')
         .then(() => check(false, 'a refused connection fails'),
             e => check(e.network === false, 'a refused connection means T3 is off, not out of reach', e.message));
-    await new t3.T3Server({id: 'closed', name: 'closed', url: 'http://t3-ai-usage.invalid'}, http).call('server.getConfig')
+    // Without a proxy, which would answer for the unknown host itself.
+    const direct = t3.makeHttpSession();
+    direct.set_proxy_resolver(null);
+    await new t3.T3Server({id: 'closed', name: 'closed', url: 'http://t3-ai-usage.invalid'}, direct).call('server.getConfig')
         .then(() => check(false, 'an unknown host fails'),
             e => check(e instanceof t3.Unavailable && e.network === true, 'an unknown host is out of reach', e.message));
     const runtime = Gio.File.new_for_path(`${work}/.t3/userdata/server-runtime.json`);

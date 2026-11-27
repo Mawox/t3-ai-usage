@@ -72,6 +72,9 @@ function defaultRank(driver) {
 export function collectAccounts(snapshots) {
     const byKey = new Map();
     for (const {env, providers, accents} of snapshots) {
+        // Keys of accounts without an e-mail on this server, by instance: two providers
+        // of one driver and name on one server are two accounts.
+        const named = new Map();
         for (const p of providers ?? []) {
             const limits = p.usageLimits;
             if (!p.enabled || !limits || limits.unavailable?.reason === 'unsupported')
@@ -79,9 +82,16 @@ export function collectAccounts(snapshots) {
             if (!limits.unavailable && !(limits.windows?.length))
                 continue;
             const name = p.displayName || p.instanceId;
+            let key = accountKey(p, name);
+            if (!p.auth?.email) {
+                if (named.has(key) && named.get(key) !== p.instanceId)
+                    key = `${key}:${p.instanceId}`;
+                named.set(key, p.instanceId);
+            }
             const account = {
-                key: accountKey(p, name),
+                key,
                 driver: p.driver,
+                email: p.auth?.email ?? null,
                 name,
                 defaultLabel: defaultLabel(name, p.driver),
                 plan: p.auth?.label ?? '',
@@ -120,6 +130,16 @@ export function collectAccounts(snapshots) {
 }
 
 const KNOWN_ACCOUNT_DAYS = 30;
+// The instance id of a provider not identified yet (entries saved before 1.3).
+const UNKNOWN_INSTANCE = '?';
+
+// The login's e-mail; entries saved before 1.3 have it only in the key.
+function emailOf(k) {
+    if (k.email !== undefined)
+        return k.email;
+    const part = k.key.split(':')[1] ?? '';
+    return part.includes('@') ? part : null;
+}
 
 // Updates the remembered accounts (the `known-accounts` setting, which the
 // preferences list) with what the servers that answered in this poll report.
@@ -128,64 +148,70 @@ const KNOWN_ACCOUNT_DAYS = 30;
 //   servers    every configured server, [{id, name}]
 //   providers  Map of server id -> T3's provider list, for the servers that answered
 //   today      'YYYY-MM-DD'
-// An account T3 no longer reports is kept while one of its providers may bring it
-// back: its server did not answer, or T3 has the provider switched on and reports
-// no account from it yet. When several remembered accounts wait on one provider,
-// the one seen last keeps it. The rest are dropped: T3 dropped or switched off the
-// provider, reports another login from it, or the server was removed. Accounts not
-// seen for 30 days are dropped too.
+// Each remembered account lists its providers: a server and T3's instance id there.
+// An account T3 no longer reports is kept while one of them may bring it back: its
+// server did not answer (or answered with no providers at all, as T3 may while it
+// starts), or T3 has the provider switched on and reports no account from it yet.
+// When several remembered accounts wait on one provider, the one seen last keeps it.
+// The rest are dropped: T3 dropped or switched off the provider, reports another
+// login from it, or the server was removed. Accounts not seen for 30 days are
+// dropped too.
 // An account reported for the first time follows a dropped one of the same name
-// from the same provider: T3 gave the login a new key. It inherits that account's
-// label, place, top-bar switch and hidden limits.
+// from the same provider, unless their e-mails differ: T3 gave the login a new key.
+// It replaces that account and inherits its label, place, top-bar switch and
+// hidden limits.
 // Returns {known, fresh, inherited, hide}: the new list, accounts seen for the first
 // time that follow no other, a Map of new key -> the key it follows, and the keys of
 // Fable windows seen for the first time (in hidden-windows form).
 export function reconcileAccounts(known, accounts, servers, providers, today) {
     const configured = new Set(servers.map(s => s.id));
-    const idByName = new Map(servers.map(s => [s.name, s.id]));
-    const enabled = new Map([...providers].map(([id, list]) =>
-        [id, new Map((list ?? []).filter(p => p.enabled).map(p => [p.instanceId, p]))]));
-    const current = new Map(accounts.map(a => [a.key, a]));
-    const reported = new Set(accounts.flatMap(a => a.instances));
-
-    // Entries saved before version 1.3 name their servers but not the provider: it is
-    // the one with the same driver and name. They wait until those servers answer.
-    const upgrade = k => {
-        if (Array.isArray(k.instances))
-            return k;
-        const instances = [];
-        for (const name of k.sources ?? []) {
-            const id = idByName.get(name);
-            if (id === undefined)
-                continue;
-            if (!enabled.has(id))
-                return k;
-            const p = [...enabled.get(id).values()].find(x => x.driver === k.driver && (x.displayName || x.instanceId) === k.name);
-            if (p)
-                instances.push(instanceKey(id, p.instanceId));
-        }
-        return {...k, instances};
-    };
-    const age = k => (Date.parse(today) - Date.parse(k.lastSeen)) / 864e5;
-    const remembered = known.filter(k => typeof k?.key === 'string' && age(k) <= KNOWN_ACCOUNT_DAYS).map(upgrade);
-    const byKey = new Map(remembered.map(k => [k.key, k]));
-    const absent = remembered.filter(k => !current.has(k.key));
-    const latestFirst = (x, y) => String(y.lastSeen).localeCompare(String(x.lastSeen));
-
+    const enabled = new Map([...providers].filter(([, list]) => list?.length).map(([id, list]) =>
+        [id, new Map(list.filter(p => p.enabled).map(p => [p.instanceId, p]))]));
     const unanswered = instance => {
         const [id] = splitInstance(instance);
         return configured.has(id) && !enabled.has(id);
     };
+    const current = new Map(accounts.map(a => [a.key, a]));
+    const reported = new Set(accounts.flatMap(a => a.instances));
+
+    // Entries saved before 1.3 name their servers but not the provider: it is the one
+    // with the same driver and name, found once the server answers. A server name
+    // that several servers share stands for each of them.
+    const resolve = k => {
+        const instances = Array.isArray(k.instances)
+            ? k.instances
+            : (k.sources ?? []).flatMap(name => servers.filter(s => s.name === name)
+                .map(s => instanceKey(s.id, UNKNOWN_INSTANCE)));
+        return {
+            ...k,
+            instances: instances.flatMap(instance => {
+                const [id, instanceId] = splitInstance(instance);
+                if (instanceId !== UNKNOWN_INSTANCE || !enabled.has(id))
+                    return [instance];
+                const p = [...enabled.get(id).values()]
+                    .find(x => x.driver === k.driver && (x.displayName || x.instanceId) === k.name);
+                return p ? [instanceKey(id, p.instanceId)] : [];
+            }),
+        };
+    };
+    const age = k => (Date.parse(today) - Date.parse(k.lastSeen)) / 864e5;
+    const remembered = known.filter(k => typeof k?.key === 'string' && age(k) <= KNOWN_ACCOUNT_DAYS).map(resolve);
+    const byKey = new Map(remembered.map(k => [k.key, k]));
+    const absent = remembered.filter(k => !current.has(k.key));
+    // By the day last seen, and on the same day the one saved later.
+    const position = new Map(remembered.map((k, i) => [k.key, i]));
+    const latestFirst = (x, y) => String(y.lastSeen).localeCompare(String(x.lastSeen)) ||
+        position.get(y.key) - position.get(x.key);
+
     const holder = new Map();
     for (const k of [...absent].sort(latestFirst)) {
-        for (const instance of k.instances ?? []) {
+        for (const instance of k.instances) {
             const [id, instanceId] = splitInstance(instance);
             if (enabled.get(id)?.has(instanceId) && !reported.has(instance) && !holder.has(instance))
                 holder.set(instance, k);
         }
     }
-    const alive = k => !Array.isArray(k.instances) ||
-        k.instances.some(instance => unanswered(instance) || holder.get(instance) === k);
+    const alive = k => k.instances.some(instance => unanswered(instance) || holder.get(instance) === k);
 
     const inherited = new Map();
     const fresh = [];
@@ -193,7 +219,8 @@ export function reconcileAccounts(known, accounts, servers, providers, today) {
         if (byKey.has(a.key))
             continue;
         const before = absent.filter(k => k.driver === a.driver && k.name === a.name &&
-            (k.instances ?? []).some(instance => a.instances.includes(instance))).sort(latestFirst)[0];
+            !(a.email && emailOf(k) && a.email !== emailOf(k)) &&
+            k.instances.some(instance => a.instances.includes(instance))).sort(latestFirst)[0];
         if (before)
             inherited.set(a.key, before.key);
         else
@@ -201,7 +228,6 @@ export function reconcileAccounts(known, accounts, servers, providers, today) {
     }
 
     const hide = [];
-    // Windows T3 no longer reports stay listed, so their switches keep their state.
     const record = (a, before) => {
         const seen = before?.windows ?? [];
         const windows = a.windows.map(w => ({id: windowId(w), label: w.label}));
@@ -209,17 +235,25 @@ export function reconcileAccounts(known, accounts, servers, providers, today) {
             if (isFable(w) && !seen.some(b => b.id === windowId(w)))
                 hide.push(windowKey(a.key, windowId(w)));
         }
+        // Servers that did not answer this time still run it as far as is known.
+        const elsewhere = (before?.instances ?? []).filter(i => unanswered(i) && !a.instances.includes(i));
+        const elsewhereNames = servers.filter(s => elsewhere.some(i => splitInstance(i)[0] === s.id)).map(s => s.name);
         return {
-            key: a.key, name: a.name, driver: a.driver, plan: a.plan, defaultLabel: a.defaultLabel,
-            sources: a.sources, instances: a.instances, lastSeen: today,
+            key: a.key, name: a.name, driver: a.driver, email: a.email, plan: a.plan, defaultLabel: a.defaultLabel,
+            sources: [...new Set([...a.sources, ...elsewhereNames])],
+            instances: [...a.instances, ...elsewhere],
+            lastSeen: today,
+            // Windows T3 no longer reports stay listed, so their switches keep their state.
             windows: [...windows, ...seen.filter(b => !windows.some(c => c.id === b.id))],
         };
     };
+    // An account followed by a new key is replaced by it.
+    const followed = new Set(inherited.values());
     const next = [];
     for (const k of remembered) {
         if (current.has(k.key))
             next.push(record(current.get(k.key), k));
-        else if (alive(k))
+        else if (alive(k) && !followed.has(k.key))
             next.push(k);
     }
     for (const a of accounts) {
