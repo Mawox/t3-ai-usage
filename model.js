@@ -67,20 +67,25 @@ function defaultRank(driver) {
     return i < 0 ? DRIVER_ORDER.length : i;
 }
 
+// The account key of each switched-on provider of one server, by instance id, also
+// for providers with no limits yet. Providers without an e-mail that share a driver
+// and name on one server go by their instance ids instead, all of them, so that no
+// key passes to another provider when one goes.
+function providerKeys(providers) {
+    const switchedOn = (providers ?? []).filter(p => p.enabled);
+    const plain = p => accountKey(p, p.displayName || p.instanceId);
+    return new Map(switchedOn.map(p => {
+        const shared = !p.auth?.email && switchedOn.filter(x => !x.auth?.email && plain(x) === plain(p)).length > 1;
+        return [p.instanceId, shared ? `${p.driver}:instance:${p.instanceId}:${p.displayName || p.instanceId}` : plain(p)];
+    }));
+}
+
 // snapshots: [{env: {id, name}, providers, accents}] in environment priority order.
 // Returns accounts in default order (Claude, Codex, then the rest as T3 lists them).
 export function collectAccounts(snapshots) {
     const byKey = new Map();
     for (const {env, providers, accents} of snapshots) {
-        // Providers without an e-mail that share a driver and name on one server go by
-        // their instance ids instead, all of them, so that no key passes to another
-        // provider when one goes. Counted over every switched-on provider.
-        const switchedOn = (providers ?? []).filter(p => p.enabled);
-        const plain = p => accountKey(p, p.displayName || p.instanceId);
-        const keys = new Map(switchedOn.map(p => {
-            const shared = !p.auth?.email && switchedOn.filter(x => !x.auth?.email && plain(x) === plain(p)).length > 1;
-            return [p.instanceId, shared ? `${p.driver}:instance:${p.instanceId}:${p.displayName || p.instanceId}` : plain(p)];
-        }));
+        const keys = providerKeys(providers);
         for (const p of providers ?? []) {
             const limits = p.usageLimits;
             if (!p.enabled || !limits || limits.unavailable?.reason === 'unsupported')
@@ -188,6 +193,9 @@ export function reconcileAccounts(known, accounts, servers, providers, today) {
     };
     const current = new Map(accounts.map(a => [a.key, a]));
     const reported = new Set(accounts.flatMap(a => a.instances));
+    // The key each provider's account has now, reported or not.
+    const keyNow = new Map([...providers].flatMap(([id, list]) =>
+        [...providerKeys(list)].map(([instanceId, key]) => [instanceKey(id, instanceId), key])));
     // T3 runs the provider but reports no account from it yet.
     const waiting = instance => {
         const [id, instanceId] = splitInstance(instance);
@@ -233,23 +241,53 @@ export function reconcileAccounts(known, accounts, servers, providers, today) {
     const latestFirst = (x, y) => String(y.lastSeen).localeCompare(String(x.lastSeen)) ||
         position.get(y.key) - position.get(x.key);
 
+    // Entries waiting on providers whose account has one key now (one login on two
+    // servers) are one account: of those whose login does not differ from the one the
+    // provider has now, the one seen last keeps it.
+    const providerAt = instance => {
+        const [id, instanceId] = splitInstance(instance);
+        return enabled.get(id)?.get(instanceId);
+    };
+    const accountOf = instance => keyNow.get(instance) ?? instance;
+    const compatible = (k, instance) => {
+        const auth = providerAt(instance)?.auth;
+        return !differ(auth?.email, emailOf(k)) && !differ(auth?.workspaceId, workspaceOf(k));
+    };
     const holder = new Map();
+    // An entry under the very key a waiting provider will report is that account.
+    for (const instance of keyNow.keys()) {
+        const k = byKey.get(accountOf(instance));
+        if (waiting(instance) && k && !current.has(k.key))
+            holder.set(k.key, k);
+    }
     for (const k of [...absent].sort(latestFirst)) {
         for (const instance of k.instances) {
-            if (waiting(instance) && !holder.has(instance))
-                holder.set(instance, k);
+            if (waiting(instance) && !holder.has(accountOf(instance)) && compatible(k, instance))
+                holder.set(accountOf(instance), k);
         }
     }
-    const alive = k => k.instances.some(instance => unanswered(instance) || holder.get(instance) === k);
+    // The provider may still bring this entry back.
+    const keeps = (k, instance) => unanswered(instance) || (waiting(instance) && holder.get(accountOf(instance)) === k);
+    // The waiting providers of the account an entry keeps, of a login that does not differ.
+    const waitingFor = k => [...keyNow.keys()]
+        .filter(instance => waiting(instance) && holder.get(accountOf(instance)) === k && compatible(k, instance));
+    const alive = k => k.instances.some(instance => keeps(k, instance)) || waitingFor(k).length > 0;
 
     const inherited = new Map();
     const fresh = [];
     for (const a of accounts) {
         if (byKey.has(a.key))
             continue;
+        // An entry from one of its providers, or the same login on another server: a
+        // provider whose account has its key now, or, on a server that did not answer,
+        // one of the same name when the account goes by its name (no e-mail, and no
+        // other provider of that name beside it).
+        const byName = a.key === `${a.driver}:name:${a.name}`;
+        const sameLogin = (k, instance) => a.instances.includes(instance) || keyNow.get(instance) === a.key ||
+            (unanswered(instance) && byName && !emailOf(k) && k.name === a.name);
         const before = absent.filter(k => k.driver === a.driver &&
             !differ(a.email, emailOf(k)) && !differ(a.workspace, workspaceOf(k)) &&
-            k.instances.some(instance => a.instances.includes(instance))).sort(latestFirst)[0];
+            k.instances.some(instance => sameLogin(k, instance))).sort(latestFirst)[0];
         if (before)
             inherited.set(a.key, before.key);
         else
@@ -279,8 +317,9 @@ export function reconcileAccounts(known, accounts, servers, providers, today) {
         };
     };
     // An account kept without a report keeps only the providers that may still bring it back.
+    // The entry kept for an account takes the providers of the others waiting on it.
     const retained = k => {
-        const instances = k.instances.filter(instance => unanswered(instance) || holder.get(instance) === k);
+        const instances = [...new Set([...k.instances.filter(instance => keeps(k, instance)), ...waitingFor(k)])];
         const ids = new Set(instances.map(instance => splitInstance(instance)[0]));
         return {...k, instances, sources: servers.filter(s => ids.has(s.id)).map(s => s.name)};
     };

@@ -148,11 +148,11 @@ const known = [
 ];
 const first = model.reconcileAccounts(known, now, servers, answered, TODAY);
 const keys = r => r.known.map(k => k.key);
-equal(keys(first), ['codex:a@x:ws1', 'antigravity:fp:new', 'antigravity:fp:laptop', 'kiro:x', 'claudeAgent:b@x:ws1'],
-    'drops replaced keys, renamed and switched-off providers, removed servers and old entries');
+equal(keys(first), ['codex:a@x:ws1', 'antigravity:fp:new', 'kiro:x', 'claudeAgent:b@x:ws1'],
+    'drops replaced keys, renamed and switched-off providers, removed servers, old entries, and an older entry of the same account');
 equal(first.known.find(k => k.key === 'codex:a@x:ws1').instances, ['local|codex', 'hub|codex'], 'current accounts record their providers');
-equal(first.known.find(k => k.key === 'antigravity:fp:new').instances, ['hub|antigravity'],
-    'an old entry learns its provider once its servers answer');
+equal(first.known.find(k => k.key === 'antigravity:fp:new').instances, ['hub|antigravity', 'local|antigravity'],
+    'an old entry learns its provider once its servers answer, and takes the laptop\'s of the same account');
 equal(first.known.find(k => k.key === 'kiro:x').instances, ['nas|?'], 'an entry waits for a server that did not answer');
 equal([first.fresh.map(a => a.key), [...first.inherited]], [['claudeAgent:b@x:ws1'], []], 'a new login is fresh');
 
@@ -174,7 +174,7 @@ equal(second.fresh, [], 'nothing fresh');
 const fable = model.reconcileAccounts([], [{...now[0], windows: [{id: 'seven_day_fable', label: 'Weekly · Fable'}]}],
     servers, answered, TODAY);
 equal(fable.hide, [`${now[0].key}|seven_day_fable`], 'a Fable window seen for the first time is hidden');
-equal(model.reconcileAccounts(first.known, [], servers, new Map(), TODAY).known.length, 5,
+equal(model.reconcileAccounts(first.known, [], servers, new Map(), TODAY).known.length, 4,
     'nothing is dropped when no server answered');
 
 // Only the laptop answers.
@@ -261,6 +261,41 @@ const sameDay = model.reconcileAccounts([
     legacy('antigravity:fp:newer', 'Antigravity', 'antigravity', ['hub'], '2026-11-26', [{id: 'b', label: 'b'}]),
 ], now2.filter(a => a.driver === 'antigravity'), servers, answered2, TODAY);
 equal([...sameDay.inherited], [['antigravity:name:Antigravity', 'antigravity:fp:newer']], 'on the same day the one saved later wins');
+
+// 27 Nov 2026 after 1.3: Antigravity runs on the laptop and the hub, both without limits,
+// with an old entry for each. They are one account: the one seen last stays, and takes
+// over when the account reports again, from either server.
+const agWaiting = [legacy('antigravity:fp:laptop', 'Antigravity', 'antigravity', ['This computer'], '2026-11-11'),
+    {...legacy('antigravity:fp:hub', 'Antigravity', 'antigravity', ['hub'], '2026-11-26', [{id: '3p-5h', label: '5h'}]),
+        instances: ['hub|antigravity']}];
+const oneLeft = model.reconcileAccounts(agWaiting, now, servers, answered, TODAY);
+equal(oneLeft.known.filter(k => k.driver === 'antigravity').map(k => k.key), ['antigravity:fp:hub'],
+    'entries waiting for one account on two servers become one');
+equal(oneLeft.known.find(k => k.key === 'antigravity:fp:hub').instances, ['hub|antigravity', 'local|antigravity'],
+    'and the entry kept waits on both servers');
+const otherLogin2 = [{...legacy('codex:old@x:ws1', 'Codex', 'codex', ['This computer'], '2026-11-26'), instances: ['local|codex']},
+    {...legacy('codex:a@x:ws1', 'Codex', 'codex', ['hub'], '2026-11-20'), instances: ['hub|codex']}];
+const noLimits = list => list.map(x => (x.instanceId === 'codex' ? {...x, usageLimits: null} : x));
+const bothWaiting = new Map([['local', noLimits(localProviders)], ['hub', noLimits(hubProviders)]]);
+equal(model.reconcileAccounts(otherLogin2, [], servers, bothWaiting, TODAY).known.map(k => k.key), ['codex:a@x:ws1'],
+    'an entry of another login does not keep an account it waits on');
+const swapped = [{...legacy('codex:a@x:ws1', 'Codex', 'codex', ['This computer'], '2026-11-26'), instances: ['local|codex']}];
+const swappedProviders = new Map([['local', [{...p('codex', 'codex', 'Codex', 'b@x'), usageLimits: null}]],
+    ['hub', [{...p('codex', 'codex', 'Codex', 'a@x'), usageLimits: null}]]]);
+equal(model.reconcileAccounts(swapped, [], servers, swappedProviders, TODAY).known.map(k => [k.key, k.instances]),
+    [['codex:a@x:ws1', ['hub|codex']]], 'an entry stays with the provider that will report its own key');
+const twinsOffline = model.reconcileAccounts(oneLeft.known,
+    model.collectAccounts([{env: servers[0], providers: [noEmail('agA', 'x'), noEmail('agB', 'y')]}]), servers,
+    new Map([['local', [noEmail('agA', 'x'), noEmail('agB', 'y')]]]), TODAY);
+equal([...twinsOffline.inherited], [], 'two providers of one name do not both take over an entry by name');
+const hubSilent = new Map([['local', answered2.get('local')], ['hub', hubProviders]]);
+const laptopReports = model.reconcileAccounts(oneLeft.known,
+    model.collectAccounts([...hubSilent].map(([id, list]) => ({env: servers.find(x => x.id === id), providers: list}))),
+    servers, hubSilent, TODAY);
+equal([...laptopReports.inherited], [['antigravity:name:Antigravity', 'antigravity:fp:hub']],
+    'the account reported from the other server takes over the entry kept');
+equal([...model.reconcileAccounts(oneLeft.known, nowLaptop, servers, laptopOnly, TODAY).inherited],
+    [['antigravity:name:Antigravity', 'antigravity:fp:hub']], 'also while that server does not answer');
 
 const order = model.applyOrder([{key: 'a'}, {key: 'b'}, {key: 'c'}], ['c', 'a']).map(x => x.key);
 equal(order, ['c', 'a', 'b'], 'saved order first, unknown keys after');
