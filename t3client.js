@@ -40,10 +40,12 @@ class AuthRejected extends T3Error {}
 // The server did not answer, or its proxy answered for it: T3 is stopped, restarting
 // or out of reach. Errors that need the user (sign-in, version) are plain T3Errors.
 export class Unavailable extends T3Error {
-    // network: the server is out of reach; otherwise T3 on it is stopped or restarting.
-    constructor(message, network = false) {
+    // reason: 'off' (T3 is stopped or restarting: nothing listens, it went away, or
+    // its proxy says it is down), 'network' (the server is out of reach) or 'failing'
+    // (T3 answered but could not serve: HTTP 500, or no answer in time).
+    constructor(message, reason = 'off') {
         super(message);
-        this.network = network;
+        this.reason = reason;
     }
 }
 
@@ -76,7 +78,7 @@ function friendlyError(e) {
         e?.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.TIMED_OUT) ||
         e?.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.NETWORK_UNREACHABLE) ||
         e?.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.HOST_UNREACHABLE))
-        return new Unavailable('unreachable', true);
+        return new Unavailable('unreachable', 'network');
     return new T3Error(String(e?.message ?? e));
 }
 
@@ -433,7 +435,7 @@ export class T3Server {
         if (status === Soup.Status.UNAUTHORIZED)
             throw new AuthRejected('T3 rejected the token');
         if (TRANSIENT_STATUSES.includes(status))
-            throw new Unavailable(`T3 answered HTTP ${status} to the ticket request`);
+            throw new Unavailable(`T3 answered HTTP ${status} to the ticket request`, status === 500 ? 'failing' : 'off');
         if (status !== Soup.Status.OK)
             throw new T3Error(`T3 answered HTTP ${status} to the ticket request`);
         if (typeof body?.ticket !== 'string' || !body.ticket)
@@ -450,8 +452,10 @@ export class T3Server {
         } catch (e) {
             if (msg.status_code === 426)
                 throw new T3Error('this T3 Code version is not supported yet; update T3 AI Usage');
-            if (TRANSIENT_STATUSES.includes(msg.status_code))
-                throw new Unavailable(`T3 answered HTTP ${msg.status_code} to the WebSocket request`);
+            if (TRANSIENT_STATUSES.includes(msg.status_code)) {
+                throw new Unavailable(`T3 answered HTTP ${msg.status_code} to the WebSocket request`,
+                    msg.status_code === 500 ? 'failing' : 'off');
+            }
             throw e;
         }
     }
@@ -465,7 +469,7 @@ export class T3Server {
             let settled = false;
             let timer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, TIMEOUT_SECONDS, () => {
                 timer = 0;
-                finish(reject, new Unavailable(`no answer to ${method} in ${TIMEOUT_SECONDS} s`));
+                finish(reject, new Unavailable(`no answer to ${method} in ${TIMEOUT_SECONDS} s`, 'failing'));
                 return GLib.SOURCE_REMOVE;
             });
             const finish = (settle, value) => {

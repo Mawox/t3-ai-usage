@@ -310,7 +310,7 @@ export default class T3AiUsageExtension extends Extension {
                 console.warn(`T3 AI Usage: ${server.name}: ${error}`);
             state.error = error;
             state.unavailable = e instanceof Unavailable;
-            state.network = e instanceof Unavailable && e.network;
+            state.reason = e instanceof Unavailable ? e.reason : null;
             state.observed = false;
         }
     }
@@ -321,7 +321,7 @@ export default class T3AiUsageExtension extends Extension {
         state.providers = providers;
         state.error = null;
         state.unavailable = false;
-        state.network = false;
+        state.reason = null;
         state.observed = true;
         state.okSeconds = GLib.get_real_time() / 1e6;
         state.okAt = GLib.DateTime.new_from_unix_local(Math.floor(state.okSeconds));
@@ -347,7 +347,7 @@ export default class T3AiUsageExtension extends Extension {
         const complete = this._servers.every(server =>
             answered.includes(server) && this._states.get(server.id).providers?.length);
         // A list that cannot be read is rebuilt from a poll in which every server
-        // answered, and that poll changes no other setting.
+        // answered. That poll gives defaults only to accounts never ordered before.
         if (!readable && !complete)
             return;
         const providers = new Map(answered.map(server => [server.id, this._states.get(server.id).providers]));
@@ -356,8 +356,10 @@ export default class T3AiUsageExtension extends Extension {
         const next = JSON.stringify(result.known);
         if (next !== this._settings.get_string('known-accounts'))
             this._settings.set_string('known-accounts', next);
-        if (!readable)
-            return;
+        const ordered = this._settings.get_strv('account-order');
+        const fresh = readable ? result.fresh : result.fresh.filter(a => !ordered.includes(a.key));
+        const firstHidden = readable ? result.hide
+            : result.hide.filter(entry => fresh.some(a => entry.startsWith(`${a.key}|`)));
 
         const keep = new Set(result.known.map(k => k.key));
         const prune = keys => (complete ? keys.filter(key => keep.has(key)) : keys);
@@ -378,9 +380,9 @@ export default class T3AiUsageExtension extends Extension {
         };
 
         const order = follow(this._settings.get_strv('account-order'), true);
-        save('account-order', prune([...order, ...result.fresh.map(a => a.key).filter(k => !order.includes(k))]));
+        save('account-order', prune([...order, ...fresh.map(a => a.key).filter(k => !order.includes(k))]));
         const panel = follow(this._settings.get_strv('panel-accounts'), false);
-        const add = result.fresh.filter(a => PANEL_DEFAULT_DRIVERS.includes(a.driver) && !panel.includes(a.key));
+        const add = fresh.filter(a => PANEL_DEFAULT_DRIVERS.includes(a.driver) && !panel.includes(a.key));
         save('panel-accounts', prune([...panel, ...add.map(a => a.key)]));
 
         // Hidden windows are saved as `account key|window id`.
@@ -390,7 +392,7 @@ export default class T3AiUsageExtension extends Extension {
             hidden = [...hidden, ...hidden.filter(entry => entry.startsWith(`${before}|`))
                 .map(entry => `${key}${entry.slice(before.length)}`)];
         }
-        hidden = [...new Set([...hidden, ...result.hide])];
+        hidden = [...new Set([...hidden, ...firstHidden])];
         save('hidden-windows', complete ? hidden.filter(entry => owner(entry)) : hidden);
 
         const labels = this._settings.get_value('labels').deepUnpack();
@@ -437,15 +439,15 @@ export default class T3AiUsageExtension extends Extension {
         return this._servers.every(server => this._down(server));
     }
 
-    // The server is down only because it does not answer: T3 is off or out of reach.
-    // A server no longer configured counts as off.
+    // The server is down because T3 is off or out of reach, not because it fails. A
+    // server no longer configured counts as off.
     _off(id) {
         const server = this._servers.find(s => s.id === id);
-        return !server || (this._down(server) && this._states.get(id).unavailable);
+        return !server || (this._down(server) && ['off', 'network'].includes(this._states.get(id).reason));
     }
 
     // Builds the top bar in the roomiest layout that fits: the layouts in order, then
-    // the last one with fewer accounts and a "+N" for the rest, down to one account.
+    // the last one with fewer accounts and a "+N" for the rest, down to "+N" alone.
     _renderPanel(accounts, labels) {
         this._panelArgs = [accounts, labels];
         const room = this._panelRoom();
@@ -465,8 +467,16 @@ export default class T3AiUsageExtension extends Extension {
                 break;
             if (step + 1 < PANEL_LAYOUTS.length) {
                 layout = PANEL_LAYOUTS[step + 1];
-            } else if (shown > 1) {
-                layout = {...layout, limit: shown - 1};
+            } else if (shown > 0) {
+                // Leaves out as many accounts from the end as the excess takes, measured
+                // once; the "+N" may then take one more.
+                const boxes = this._panelBox.get_children().slice(0, shown);
+                const spacing = this._panelBox.layout_manager.spacing;
+                let limit = shown - 1;
+                for (let excess = width - room - boxes[limit].get_preferred_width(-1)[1] - spacing;
+                    limit > 0 && excess > 0; limit--)
+                    excess -= boxes[limit - 1].get_preferred_width(-1)[1] + spacing;
+                layout = {...layout, limit};
             } else {
                 this._panelTightest = true;
                 break;
@@ -673,7 +683,7 @@ export default class T3AiUsageExtension extends Extension {
         for (const server of this._servers) {
             const state = this._states.get(server.id);
             if (this._off(server.id)) {
-                note(`${server.name}: ${state.network ? 'not reachable' : 'T3 is off'}`, 't3-ai-usage-dim');
+                note(`${server.name}: ${state.reason === 'network' ? 'not reachable' : 'T3 is off'}`, 't3-ai-usage-dim');
                 continue;
             }
             if (state?.error && this._down(server)) {

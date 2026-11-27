@@ -199,8 +199,38 @@ equal([switched.fresh.map(a => a.key), switched.known.map(k => k.key)], [['codex
     'another login in the same provider starts afresh');
 
 const twins = model.collectAccounts([{env: servers[0], providers: [noEmail('agA', 'x'), noEmail('agB', 'y')]}]);
-equal(twins.map(a => a.key), ['antigravity:name:Antigravity', 'antigravity:name:Antigravity:agB'],
+equal(twins.map(a => a.key), ['antigravity:name:Antigravity:agA', 'antigravity:name:Antigravity:agB'],
     'two providers of one name on one server stay two accounts');
+const twinGone = model.reconcileAccounts(model.reconcileAccounts([], twins, servers,
+    new Map([['local', [noEmail('agA', 'x'), noEmail('agB', 'y')]]]), TODAY).known,
+model.collectAccounts([{env: servers[0], providers: [noEmail('agB', 'y')]}]), servers,
+new Map([['local', [noEmail('agB', 'y')]]]), TODAY);
+equal([[...twinGone.inherited], twinGone.known.map(k => k.key)],
+    [[['antigravity:name:Antigravity', 'antigravity:name:Antigravity:agB']], ['antigravity:name:Antigravity']],
+    'when one of them goes, the other keeps its own settings under the plain key');
+
+const renamed = model.reconcileAccounts(twinGone.known,
+    model.collectAccounts([{env: servers[0], providers: [{...noEmail('agB', 'y'), displayName: 'Gemini'}]}]), servers,
+    new Map([['local', [{...noEmail('agB', 'y'), displayName: 'Gemini'}]]]), TODAY);
+equal([...renamed.inherited], [['antigravity:name:Gemini', 'antigravity:name:Antigravity']], 'a renamed provider keeps its settings');
+
+const ws2 = [{...p('codex', 'codex', 'Codex', 'a@x'), auth: {email: 'a@x', workspaceId: 'ws2', label: 'Team'}}];
+const workspace = model.reconcileAccounts(second.known, model.collectAccounts([{env: servers[0], providers: ws2},
+    {env: servers[1], providers: ws2}]), servers, new Map([['local', ws2], ['hub', ws2]]), TODAY);
+equal([workspace.fresh.map(a => a.key), [...workspace.inherited]], [['codex:a@x:ws2'], []],
+    'another workspace of the same login starts afresh');
+
+const fp = model.reconcileAccounts([legacy('antigravity:fp:bbbb', 'Antigravity', 'antigravity', ['hub'], '2026-11-20'),
+    legacy('antigravity:fp:aaaa', 'Antigravity', 'antigravity', ['hub'], '2026-11-21')],
+model.collectAccounts([{env: servers[1], providers: [noEmail('agA', 'aaaa'), noEmail('agB', 'bbbb')]}]), servers,
+new Map([['hub', [noEmail('agA', 'aaaa'), noEmail('agB', 'bbbb')]]]), TODAY);
+equal([...fp.inherited], [['antigravity:name:Antigravity:agA', 'antigravity:fp:aaaa'],
+    ['antigravity:name:Antigravity:agB', 'antigravity:fp:bbbb']], 'old fingerprint keys find their own provider');
+
+const unsupported = model.reconcileAccounts([legacy('opencode:name:OC', 'OC', 'opencode', ['This computer'], '2026-11-20')], [], servers,
+    new Map([['local', [{instanceId: 'oc', driver: 'opencode', displayName: 'OC', enabled: true,
+        usageLimits: {unavailable: {reason: 'unsupported'}}}]]]), TODAY);
+equal(unsupported.known, [], 'a provider T3 reports as unsupported does not keep an account');
 
 const pending = {...noEmail('agA', 'x'), usageLimits: null};
 equal(model.collectAccounts([{env: servers[0], providers: [pending, noEmail('agB', 'y')]}]).map(a => a.key),

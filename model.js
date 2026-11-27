@@ -72,16 +72,15 @@ function defaultRank(driver) {
 export function collectAccounts(snapshots) {
     const byKey = new Map();
     for (const {env, providers, accents} of snapshots) {
-        // A second provider of one driver and name on one server, without an e-mail, is
-        // another account: its key gets the instance id. Keys are given over every
-        // switched-on provider, so none moves to another while one has no limits.
-        const keys = new Map();
-        for (const p of providers ?? []) {
-            if (!p.enabled)
-                continue;
-            const key = accountKey(p, p.displayName || p.instanceId);
-            keys.set(p.instanceId, !p.auth?.email && [...keys.values()].includes(key) ? `${key}:${p.instanceId}` : key);
-        }
+        // Providers without an e-mail that share a driver and name on one server are
+        // told apart by their instance ids, all of them, so that no key passes to
+        // another provider when one goes. Counted over every switched-on provider.
+        const switchedOn = (providers ?? []).filter(p => p.enabled);
+        const plain = p => accountKey(p, p.displayName || p.instanceId);
+        const keys = new Map(switchedOn.map(p => {
+            const shared = !p.auth?.email && switchedOn.filter(x => !x.auth?.email && plain(x) === plain(p)).length > 1;
+            return [p.instanceId, shared ? `${plain(p)}:${p.instanceId}` : plain(p)];
+        }));
         for (const p of providers ?? []) {
             const limits = p.usageLimits;
             if (!p.enabled || !limits || limits.unavailable?.reason === 'unsupported')
@@ -93,6 +92,7 @@ export function collectAccounts(snapshots) {
                 key: keys.get(p.instanceId),
                 driver: p.driver,
                 email: p.auth?.email ?? null,
+                workspace: p.auth?.workspaceId ?? null,
                 name,
                 defaultLabel: defaultLabel(name, p.driver),
                 plan: p.auth?.label ?? '',
@@ -134,12 +134,24 @@ const KNOWN_ACCOUNT_DAYS = 30;
 // The instance id of a provider not identified yet (entries saved before 1.3).
 const UNKNOWN_INSTANCE = '?';
 
-// The login's e-mail; entries saved before 1.3 have it only in the key.
+// The login's e-mail and workspace; entries saved before 1.3 have them only in the
+// key (driver:email:workspace).
 function emailOf(k) {
     if (k.email !== undefined)
         return k.email;
     const part = k.key.split(':')[1] ?? '';
     return part.includes('@') ? part : null;
+}
+
+function workspaceOf(k) {
+    if (k.workspace !== undefined)
+        return k.workspace;
+    return emailOf(k) ? k.key.split(':').slice(2).join(':') || null : null;
+}
+
+// Both are known and differ.
+function differ(x, y) {
+    return Boolean(x && y && x !== y);
 }
 
 // Updates the remembered accounts (the `known-accounts` setting, which the
@@ -166,8 +178,10 @@ function emailOf(k) {
 // Fable windows seen for the first time (in hidden-windows form).
 export function reconcileAccounts(known, accounts, servers, providers, today) {
     const configured = new Set(servers.map(s => s.id));
-    const enabled = new Map([...providers].filter(([, list]) => list?.length).map(([id, list]) =>
-        [id, new Map(list.filter(p => p.enabled).map(p => [p.instanceId, p]))]));
+    // Providers T3 runs for usage limits; one it reports as unsupported never has any.
+    const enabled = new Map([...providers].filter(([, list]) => list?.length).map(([id, list]) => [id, new Map(list
+        .filter(p => p.enabled && p.usageLimits?.unavailable?.reason !== 'unsupported')
+        .map(p => [p.instanceId, p]))]));
     const unanswered = instance => {
         const [id] = splitInstance(instance);
         return configured.has(id) && !enabled.has(id);
@@ -194,9 +208,13 @@ export function reconcileAccounts(known, accounts, servers, providers, today) {
                 const [id, instanceId] = splitInstance(instance);
                 if (instanceId !== UNKNOWN_INSTANCE || !enabled.has(id))
                     return [instance];
-                const matches = [...enabled.get(id).values()]
-                    .filter(x => x.driver === k.driver && (x.displayName || x.instanceId) === k.name);
-                const p = matches.find(x => emailOf(k) && x.auth?.email === emailOf(k)) ??
+                const all = [...enabled.get(id).values()];
+                // Old keys that name the provider: `server id:instance id`, or its
+                // credential fingerprint.
+                const exact = all.find(x => k.key === `${id}:${x.instanceId}` ||
+                    (x.usageLimits?.credentialFingerprint && k.key === `${x.driver}:fp:${x.usageLimits.credentialFingerprint.slice(0, 16)}`));
+                const matches = all.filter(x => x.driver === k.driver && (x.displayName || x.instanceId) === k.name);
+                const p = exact ?? matches.find(x => emailOf(k) && x.auth?.email === emailOf(k)) ??
                     matches.find(x => waiting(instanceKey(id, x.instanceId))) ?? matches[0];
                 return p ? [instanceKey(id, p.instanceId)] : [];
             }),
@@ -225,8 +243,8 @@ export function reconcileAccounts(known, accounts, servers, providers, today) {
     for (const a of accounts) {
         if (byKey.has(a.key))
             continue;
-        const before = absent.filter(k => k.driver === a.driver && k.name === a.name &&
-            !(a.email && emailOf(k) && a.email !== emailOf(k)) &&
+        const before = absent.filter(k => k.driver === a.driver &&
+            !differ(a.email, emailOf(k)) && !differ(a.workspace, workspaceOf(k)) &&
             k.instances.some(instance => a.instances.includes(instance))).sort(latestFirst)[0];
         if (before)
             inherited.set(a.key, before.key);
@@ -247,13 +265,20 @@ export function reconcileAccounts(known, accounts, servers, providers, today) {
         const elsewhere = (before?.instances ?? []).filter(i => !a.instances.includes(i) && (unanswered(i) || waiting(i)));
         const elsewhereNames = servers.filter(s => elsewhere.some(i => splitInstance(i)[0] === s.id)).map(s => s.name);
         return {
-            key: a.key, name: a.name, driver: a.driver, email: a.email, plan: a.plan, defaultLabel: a.defaultLabel,
+            key: a.key, name: a.name, driver: a.driver, email: a.email, workspace: a.workspace, plan: a.plan,
+            defaultLabel: a.defaultLabel,
             sources: [...new Set([...a.sources, ...elsewhereNames])],
             instances: [...a.instances, ...elsewhere],
             lastSeen: today,
             // Windows T3 no longer reports stay listed, so their switches keep their state.
             windows: [...windows, ...seen.filter(b => !windows.some(c => c.id === b.id))],
         };
+    };
+    // An account kept without a report keeps only the providers that may still bring it back.
+    const retained = k => {
+        const instances = k.instances.filter(instance => unanswered(instance) || holder.get(instance) === k);
+        const ids = new Set(instances.map(instance => splitInstance(instance)[0]));
+        return {...k, instances, sources: servers.filter(s => ids.has(s.id)).map(s => s.name)};
     };
     // An account followed by a new key is replaced by it.
     const followed = new Set(inherited.values());
@@ -262,7 +287,7 @@ export function reconcileAccounts(known, accounts, servers, providers, today) {
         if (current.has(k.key))
             next.push(record(current.get(k.key), k));
         else if (alive(k) && !followed.has(k.key))
-            next.push(k);
+            next.push(retained(k));
     }
     for (const a of accounts) {
         if (!byKey.has(a.key))
