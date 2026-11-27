@@ -151,8 +151,8 @@ const keys = r => r.known.map(k => k.key);
 equal(keys(first), ['codex:a@x:ws1', 'antigravity:fp:new', 'kiro:x', 'claudeAgent:b@x:ws1'],
     'drops replaced keys, renamed and switched-off providers, removed servers, old entries, and an older entry of the same account');
 equal(first.known.find(k => k.key === 'codex:a@x:ws1').instances, ['local|codex', 'hub|codex'], 'current accounts record their providers');
-equal(first.known.find(k => k.key === 'antigravity:fp:new').instances, ['hub|antigravity'],
-    'an old entry learns its provider once its servers answer');
+equal(first.known.find(k => k.key === 'antigravity:fp:new').instances, ['hub|antigravity', 'local|antigravity'],
+    'an old entry learns its provider once its servers answer, and takes the laptop\'s of the same account');
 equal(first.known.find(k => k.key === 'kiro:x').instances, ['nas|?'], 'an entry waits for a server that did not answer');
 equal([first.fresh.map(a => a.key), [...first.inherited]], [['claudeAgent:b@x:ws1'], []], 'a new login is fresh');
 
@@ -271,6 +271,18 @@ const agWaiting = [legacy('antigravity:fp:laptop', 'Antigravity', 'antigravity',
 const oneLeft = model.reconcileAccounts(agWaiting, now, servers, answered, TODAY);
 equal(oneLeft.known.filter(k => k.driver === 'antigravity').map(k => k.key), ['antigravity:fp:hub'],
     'entries waiting for one account on two servers become one');
+equal(oneLeft.known.find(k => k.key === 'antigravity:fp:hub').instances, ['hub|antigravity', 'local|antigravity'],
+    'and the entry kept waits on both servers');
+const otherLogin2 = [{...legacy('codex:old@x:ws1', 'Codex', 'codex', ['This computer'], '2026-11-26'), instances: ['local|codex']},
+    {...legacy('codex:a@x:ws1', 'Codex', 'codex', ['hub'], '2026-11-20'), instances: ['hub|codex']}];
+const noLimits = list => list.map(x => (x.instanceId === 'codex' ? {...x, usageLimits: null} : x));
+const bothWaiting = new Map([['local', noLimits(localProviders)], ['hub', noLimits(hubProviders)]]);
+equal(model.reconcileAccounts(otherLogin2, [], servers, bothWaiting, TODAY).known.map(k => k.key), ['codex:a@x:ws1'],
+    'an entry of another login does not keep an account it waits on');
+const twinsOffline = model.reconcileAccounts(oneLeft.known,
+    model.collectAccounts([{env: servers[0], providers: [noEmail('agA', 'x'), noEmail('agB', 'y')]}]), servers,
+    new Map([['local', [noEmail('agA', 'x'), noEmail('agB', 'y')]]]), TODAY);
+equal([...twinsOffline.inherited], [], 'two providers of one name do not both take over an entry by name');
 const hubSilent = new Map([['local', answered2.get('local')], ['hub', hubProviders]]);
 const laptopReports = model.reconcileAccounts(oneLeft.known,
     model.collectAccounts([...hubSilent].map(([id, list]) => ({env: servers.find(x => x.id === id), providers: list}))),

@@ -242,18 +242,24 @@ export function reconcileAccounts(known, accounts, servers, providers, today) {
         position.get(y.key) - position.get(x.key);
 
     // Entries waiting on providers whose account has one key now (one login on two
-    // servers) are one account: the one seen last keeps it.
+    // servers) are one account: of those whose login does not differ from the one the
+    // provider has now, the one seen last keeps it.
+    const providerAt = instance => {
+        const [id, instanceId] = splitInstance(instance);
+        return enabled.get(id)?.get(instanceId);
+    };
+    const accountOf = instance => keyNow.get(instance) ?? instance;
     const holder = new Map();
     for (const k of [...absent].sort(latestFirst)) {
         for (const instance of k.instances) {
-            const account = keyNow.get(instance) ?? instance;
-            if (waiting(instance) && !holder.has(account))
-                holder.set(account, k);
+            const auth = providerAt(instance)?.auth;
+            if (waiting(instance) && !holder.has(accountOf(instance)) &&
+                !differ(auth?.email, emailOf(k)) && !differ(auth?.workspaceId, workspaceOf(k)))
+                holder.set(accountOf(instance), k);
         }
     }
     // The provider may still bring this entry back.
-    const keeps = (k, instance) =>
-        unanswered(instance) || (waiting(instance) && holder.get(keyNow.get(instance) ?? instance) === k);
+    const keeps = (k, instance) => unanswered(instance) || (waiting(instance) && holder.get(accountOf(instance)) === k);
     const alive = k => k.instances.some(instance => keeps(k, instance));
 
     const inherited = new Map();
@@ -263,9 +269,11 @@ export function reconcileAccounts(known, accounts, servers, providers, today) {
             continue;
         // An entry from one of its providers, or the same login on another server: a
         // provider whose account has its key now, or, on a server that did not answer,
-        // one of the same name when neither has an e-mail (the name is then the key).
+        // one of the same name when the account goes by its name (no e-mail, and no
+        // other provider of that name beside it).
+        const byName = a.key === `${a.driver}:name:${a.name}`;
         const sameLogin = (k, instance) => a.instances.includes(instance) || keyNow.get(instance) === a.key ||
-            (unanswered(instance) && !a.email && !emailOf(k) && k.name === a.name);
+            (unanswered(instance) && byName && !emailOf(k) && k.name === a.name);
         const before = absent.filter(k => k.driver === a.driver &&
             !differ(a.email, emailOf(k)) && !differ(a.workspace, workspaceOf(k)) &&
             k.instances.some(instance => sameLogin(k, instance))).sort(latestFirst)[0];
@@ -298,8 +306,10 @@ export function reconcileAccounts(known, accounts, servers, providers, today) {
         };
     };
     // An account kept without a report keeps only the providers that may still bring it back.
+    // The entry kept for an account takes the providers of the others waiting on it.
+    const waitingFor = k => [...keyNow.keys()].filter(instance => waiting(instance) && holder.get(accountOf(instance)) === k);
     const retained = k => {
-        const instances = k.instances.filter(instance => keeps(k, instance));
+        const instances = [...new Set([...k.instances.filter(instance => keeps(k, instance)), ...waitingFor(k)])];
         const ids = new Set(instances.map(instance => splitInstance(instance)[0]));
         return {...k, instances, sources: servers.filter(s => ids.has(s.id)).map(s => s.name)};
     };
