@@ -1,5 +1,8 @@
 .t3-ai-usage-panel { spacing: 10px; }
 .t3-ai-usage-account { spacing: 4px; }
+/* When the top bar is short of room. */
+.t3-ai-usage-panel-tight { spacing: 6px; }
+.t3-ai-usage-account-tight { spacing: 2px; }
 .t3-ai-usage-label { font-weight: bold; }
 .t3-ai-usage-reset { font-feature-settings: "tnum"; }
 .t3-ai-usage-error { color: #f0b429; font-weight: bold; }

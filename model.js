@@ -17,15 +17,26 @@ export function defaultLabel(name, driver) {
     return DRIVER_LABELS[driver] ?? name.slice(0, 2);
 }
 
-// The same login can run on several T3 servers (laptop and hub). T3's credential
-// fingerprint, or else e-mail plus workspace, identifies it across them.
-function accountKey(envId, p) {
-    const fingerprint = p.usageLimits?.credentialFingerprint;
-    if (fingerprint)
-        return `${p.driver}:fp:${fingerprint.slice(0, 16)}`;
+// The same login can run on several T3 servers (laptop and hub). Its e-mail plus
+// workspace identifies it across them. An account without an e-mail goes by its
+// driver and name: T3's credential fingerprint changes with every new sign-in, and
+// differs between servers. Two such accounts of one driver and name, on different
+// servers, are taken for one.
+function accountKey(p, name) {
     if (p.auth?.email)
         return [p.driver, p.auth.email, p.auth.workspaceId].filter(Boolean).join(':');
-    return `${envId}:${p.instanceId}`;
+    return `${p.driver}:name:${name}`;
+}
+
+// A provider account in T3: the server's id and T3's instance id there.
+function instanceKey(serverId, instanceId) {
+    return `${serverId}|${instanceId}`;
+}
+
+// [server id, instance id]. Server ids are 'local' or UUIDs.
+function splitInstance(instance) {
+    const i = instance.indexOf('|');
+    return [instance.slice(0, i), instance.slice(i + 1)];
 }
 
 export function secondsUntil(iso) {
@@ -69,7 +80,7 @@ export function collectAccounts(snapshots) {
                 continue;
             const name = p.displayName || p.instanceId;
             const account = {
-                key: accountKey(env.id, p),
+                key: accountKey(p, name),
                 driver: p.driver,
                 name,
                 defaultLabel: defaultLabel(name, p.driver),
@@ -79,6 +90,8 @@ export function collectAccounts(snapshots) {
                 unavailable: limits.unavailable ?? null,
                 windows: limits.windows ?? [],
                 sources: [env.name],
+                serverIds: [env.id],
+                instances: [instanceKey(env.id, p.instanceId)],
             };
             const existing = byKey.get(account.key);
             if (!existing) {
@@ -95,6 +108,8 @@ export function collectAccounts(snapshots) {
                 defaultLabel: existing.defaultLabel,
                 accent: existing.accent ?? account.accent,
                 sources: [...existing.sources, env.name],
+                serverIds: [...existing.serverIds, env.id],
+                instances: [...existing.instances, ...account.instances],
             });
         }
     }
@@ -102,6 +117,116 @@ export function collectAccounts(snapshots) {
         .map((a, i) => ({a, i}))
         .sort((x, y) => defaultRank(x.a.driver) - defaultRank(y.a.driver) || x.i - y.i)
         .map(x => x.a);
+}
+
+const KNOWN_ACCOUNT_DAYS = 30;
+
+// Updates the remembered accounts (the `known-accounts` setting, which the
+// preferences list) with what the servers that answered in this poll report.
+//   known      the saved list
+//   accounts   collectAccounts() of the servers that answered
+//   servers    every configured server, [{id, name}]
+//   providers  Map of server id -> T3's provider list, for the servers that answered
+//   today      'YYYY-MM-DD'
+// An account T3 no longer reports is kept while one of its providers may bring it
+// back: its server did not answer, or T3 has the provider switched on and reports
+// no account from it yet. When several remembered accounts wait on one provider,
+// the one seen last keeps it. The rest are dropped: T3 dropped or switched off the
+// provider, reports another login from it, or the server was removed. Accounts not
+// seen for 30 days are dropped too.
+// An account reported for the first time follows a dropped one of the same name
+// from the same provider: T3 gave the login a new key. It inherits that account's
+// label, place, top-bar switch and hidden limits.
+// Returns {known, fresh, inherited, hide}: the new list, accounts seen for the first
+// time that follow no other, a Map of new key -> the key it follows, and the keys of
+// Fable windows seen for the first time (in hidden-windows form).
+export function reconcileAccounts(known, accounts, servers, providers, today) {
+    const configured = new Set(servers.map(s => s.id));
+    const idByName = new Map(servers.map(s => [s.name, s.id]));
+    const enabled = new Map([...providers].map(([id, list]) =>
+        [id, new Map((list ?? []).filter(p => p.enabled).map(p => [p.instanceId, p]))]));
+    const current = new Map(accounts.map(a => [a.key, a]));
+    const reported = new Set(accounts.flatMap(a => a.instances));
+
+    // Entries saved before version 1.3 name their servers but not the provider: it is
+    // the one with the same driver and name. They wait until those servers answer.
+    const upgrade = k => {
+        if (Array.isArray(k.instances))
+            return k;
+        const instances = [];
+        for (const name of k.sources ?? []) {
+            const id = idByName.get(name);
+            if (id === undefined)
+                continue;
+            if (!enabled.has(id))
+                return k;
+            const p = [...enabled.get(id).values()].find(x => x.driver === k.driver && (x.displayName || x.instanceId) === k.name);
+            if (p)
+                instances.push(instanceKey(id, p.instanceId));
+        }
+        return {...k, instances};
+    };
+    const age = k => (Date.parse(today) - Date.parse(k.lastSeen)) / 864e5;
+    const remembered = known.filter(k => typeof k?.key === 'string' && age(k) <= KNOWN_ACCOUNT_DAYS).map(upgrade);
+    const byKey = new Map(remembered.map(k => [k.key, k]));
+    const absent = remembered.filter(k => !current.has(k.key));
+    const latestFirst = (x, y) => String(y.lastSeen).localeCompare(String(x.lastSeen));
+
+    const unanswered = instance => {
+        const [id] = splitInstance(instance);
+        return configured.has(id) && !enabled.has(id);
+    };
+    const holder = new Map();
+    for (const k of [...absent].sort(latestFirst)) {
+        for (const instance of k.instances ?? []) {
+            const [id, instanceId] = splitInstance(instance);
+            if (enabled.get(id)?.has(instanceId) && !reported.has(instance) && !holder.has(instance))
+                holder.set(instance, k);
+        }
+    }
+    const alive = k => !Array.isArray(k.instances) ||
+        k.instances.some(instance => unanswered(instance) || holder.get(instance) === k);
+
+    const inherited = new Map();
+    const fresh = [];
+    for (const a of accounts) {
+        if (byKey.has(a.key))
+            continue;
+        const before = absent.filter(k => k.driver === a.driver && k.name === a.name &&
+            (k.instances ?? []).some(instance => a.instances.includes(instance))).sort(latestFirst)[0];
+        if (before)
+            inherited.set(a.key, before.key);
+        else
+            fresh.push(a);
+    }
+
+    const hide = [];
+    // Windows T3 no longer reports stay listed, so their switches keep their state.
+    const record = (a, before) => {
+        const seen = before?.windows ?? [];
+        const windows = a.windows.map(w => ({id: windowId(w), label: w.label}));
+        for (const w of a.windows) {
+            if (isFable(w) && !seen.some(b => b.id === windowId(w)))
+                hide.push(windowKey(a.key, windowId(w)));
+        }
+        return {
+            key: a.key, name: a.name, driver: a.driver, plan: a.plan, defaultLabel: a.defaultLabel,
+            sources: a.sources, instances: a.instances, lastSeen: today,
+            windows: [...windows, ...seen.filter(b => !windows.some(c => c.id === b.id))],
+        };
+    };
+    const next = [];
+    for (const k of remembered) {
+        if (current.has(k.key))
+            next.push(record(current.get(k.key), k));
+        else if (alive(k))
+            next.push(k);
+    }
+    for (const a of accounts) {
+        if (!byKey.has(a.key))
+            next.push(record(a, byKey.get(inherited.get(a.key))));
+    }
+    return {known: next, fresh, inherited, hide};
 }
 
 // Orders items (anything with .key) by the saved order; unknown keys keep their

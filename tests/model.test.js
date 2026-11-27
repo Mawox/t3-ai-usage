@@ -104,6 +104,79 @@ equal(merged[0].sources, ['laptop', 'hub'], 'both servers are listed');
 equal(Math.round(model.secondsSince(merged[0].checkedAt)) <= 31, true, 'the fresher snapshot wins');
 equal(merged[0].accent, '#123456', 'keeps the accent colour');
 
+const noEmail = (instanceId, fingerprint) => ({
+    instanceId, driver: 'antigravity', displayName: 'Antigravity', enabled: true, auth: {label: 'Google account'},
+    usageLimits: {checkedAt: at(-60), credentialFingerprint: fingerprint, windows: [{id: '3p-weekly', usedPercent: 5}]},
+});
+const antigravity = model.collectAccounts([
+    {env: {id: 'local', name: 'laptop'}, providers: [noEmail('antigravity', 'aaaa')]},
+    {env: {id: 'hub', name: 'hub'}, providers: [noEmail('antigravity', 'bbbb')]},
+]);
+equal(antigravity.map(a => a.key), ['antigravity:name:Antigravity'],
+    'an account without an e-mail goes by driver and name, not the fingerprint, and merges across servers');
+equal(antigravity[0].instances, ['local|antigravity', 'hub|antigravity'], 'remembers the provider on each server');
+
+// Remembered accounts. The situation of 27 Nov 2026: keys that changed over time.
+const TODAY = '2026-11-27';
+const servers = [{id: 'local', name: 'This computer'}, {id: 'hub', name: 'hub'}, {id: 'nas', name: 'nas'}];
+const p = (instanceId, driver, displayName, email, extra = {}) => ({
+    instanceId, driver, displayName, enabled: true, auth: email ? {email, workspaceId: 'ws1', label: 'Pro'} : {},
+    usageLimits: email ? {checkedAt: at(-60), windows: [{id: 'primary', label: 'Weekly', usedPercent: 5}]} : null,
+    ...extra,
+});
+const localProviders = [p('codex', 'codex', 'Codex', 'a@x'), p('antigravity', 'antigravity', 'Antigravity'),
+    p('muse', 'muse', 'Muse Code', null, {enabled: false})];
+const hubProviders = [p('codex', 'codex', 'Codex', 'a@x'), p('claude_scio', 'claudeAgent', 'Claude-post', 'b@x'),
+    p('antigravity', 'antigravity', 'Antigravity')];
+const answered = new Map([['local', localProviders], ['hub', hubProviders]]);
+const now = model.collectAccounts([
+    {env: servers[0], providers: localProviders},
+    {env: servers[1], providers: hubProviders},
+]);
+const legacy = (key, name, driver, sources, lastSeen, windows = []) => ({key, name, driver, plan: '', sources, lastSeen, windows});
+const known = [
+    legacy('codex:a@x:ws1', 'Codex', 'codex', ['This computer', 'hub'], '2026-11-26'),
+    legacy('codex:a@x', 'Codex', 'codex', ['This computer'], '2026-11-05'),
+    legacy('claudeAgent:scio@x:ws1', 'Claude Scio', 'claudeAgent', ['hub'], '2026-11-14'),
+    legacy('antigravity:fp:old', 'Antigravity', 'antigravity', ['hub'], '2026-11-15', [{id: '3p-5h', label: '5h'}]),
+    legacy('antigravity:fp:new', 'Antigravity', 'antigravity', ['hub'], '2026-11-26', [{id: '3p-5h', label: '5h'}]),
+    legacy('antigravity:fp:laptop', 'Antigravity', 'antigravity', ['This computer'], '2026-11-11'),
+    legacy('muse:x', 'Muse Code', 'muse', ['This computer'], '2026-11-12'),
+    legacy('kiro:x', 'Kiro', 'kiro', ['nas'], '2026-11-20'),
+    legacy('gone:x', 'Gone', 'codex', ['old server'], '2026-11-20'),
+    legacy('expired:x', 'Codex', 'codex', ['hub'], '2026-10-20'),
+];
+const first = model.reconcileAccounts(known, now, servers, answered, TODAY);
+const keys = r => r.known.map(k => k.key);
+equal(keys(first), ['codex:a@x:ws1', 'antigravity:fp:new', 'antigravity:fp:laptop', 'kiro:x', 'claudeAgent:b@x:ws1'],
+    'drops replaced keys, renamed and switched-off providers, removed servers and old entries');
+equal(first.known.find(k => k.key === 'codex:a@x:ws1').instances, ['local|codex', 'hub|codex'], 'current accounts record their providers');
+equal(first.known.find(k => k.key === 'antigravity:fp:new').instances, ['hub|antigravity'],
+    'an old entry learns its provider once its servers answer');
+equal(first.known.find(k => k.key === 'kiro:x').instances, undefined, 'an entry waits for a server that did not answer');
+equal([first.fresh.map(a => a.key), [...first.inherited]], [['claudeAgent:b@x:ws1'], []], 'a new login is fresh');
+
+// Antigravity reports again, under its new key: it follows the entry seen last.
+const withLimits = list => list.map(x => (x.driver === 'antigravity'
+    ? {...x, usageLimits: {checkedAt: at(-60), windows: [{id: '3p-weekly', label: 'Weekly', usedPercent: 5}]}} : x));
+const answered2 = new Map([['local', withLimits(localProviders)], ['hub', withLimits(hubProviders)]]);
+const now2 = model.collectAccounts([
+    {env: servers[0], providers: answered2.get('local')},
+    {env: servers[1], providers: answered2.get('hub')},
+]);
+const second = model.reconcileAccounts(first.known, now2, servers, answered2, TODAY);
+equal([...second.inherited], [['antigravity:name:Antigravity', 'antigravity:fp:new']], 'a new key follows the account it replaces');
+equal(keys(second), ['codex:a@x:ws1', 'kiro:x', 'claudeAgent:b@x:ws1', 'antigravity:name:Antigravity'],
+    'the replaced entries are dropped');
+equal(second.known.at(-1).windows.map(w => w.id), ['3p-weekly', '3p-5h'], 'keeps the windows of the account it follows');
+equal(second.fresh, [], 'nothing fresh');
+
+const fable = model.reconcileAccounts([], [{...now[0], windows: [{id: 'seven_day_fable', label: 'Weekly · Fable'}]}],
+    servers, answered, TODAY);
+equal(fable.hide, [`${now[0].key}|seven_day_fable`], 'a Fable window seen for the first time is hidden');
+equal(model.reconcileAccounts(first.known, [], servers, new Map(), TODAY).known.length, 5,
+    'nothing is dropped when no server answered');
+
 const order = model.applyOrder([{key: 'a'}, {key: 'b'}, {key: 'c'}], ['c', 'a']).map(x => x.key);
 equal(order, ['c', 'a', 'b'], 'saved order first, unknown keys after');
 

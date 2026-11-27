@@ -39,7 +39,13 @@ export class T3Error extends Error {}
 class AuthRejected extends T3Error {}
 // The server did not answer, or its proxy answered for it: T3 is stopped, restarting
 // or out of reach. Errors that need the user (sign-in, version) are plain T3Errors.
-export class Unavailable extends T3Error {}
+export class Unavailable extends T3Error {
+    // network: the server is out of reach; otherwise T3 on it is stopped or restarting.
+    constructor(message, network = false) {
+        super(message);
+        this.network = network;
+    }
+}
 
 // Statuses a proxy or server gives while T3 restarts or is overloaded. Others, such
 // as 511 (sign in to the network), need the user.
@@ -70,7 +76,7 @@ function friendlyError(e) {
         e?.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.TIMED_OUT) ||
         e?.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.NETWORK_UNREACHABLE) ||
         e?.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.HOST_UNREACHABLE))
-        return new Unavailable('unreachable');
+        return new Unavailable('unreachable', true);
     return new T3Error(String(e?.message ?? e));
 }
 

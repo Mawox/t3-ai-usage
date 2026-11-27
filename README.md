@@ -6,9 +6,9 @@ A GNOME Shell extension that shows the usage limits of every AI account in [T3 C
 
 T3 Code already checks the limits of every provider account it runs: Claude, Codex, Cursor, Antigravity and others. This extension reads them from T3 and shows:
 
-- **Top bar:** a ring for each account, filled to the share left of its fullest limit, and the time until that limit resets.
+- **Top bar:** a ring for each account, filled to the share left of its fullest limit, and the time until that limit resets. When the top bar is short of room, the spacing tightens and then the reset times go, so that GNOME does not cut the labels to "…".
 - **Menu:** one line for every limit of every account: a bar whose marker shows where an even pace would be, the share left, and the time until the reset (↻). A limit on course to run short gets a second line ("Runs out in 2 d, 1 d before the reset"). On a short screen the list scrolls.
-- **Settings:** the order of the accounts, which of them go in the top bar, their short labels, which limits to hide, and T3 servers on other computers.
+- **Settings:** the order of the accounts, which of them go in the top bar, their short labels, which limits to hide, and T3 servers on other computers. The list holds the accounts T3 reported in the last 30 days. One that T3 no longer reports goes once its servers answer without it. When T3 gives a login a new key, as it does after a new sign-in to an account without an e-mail address, the label, place and hidden limits move to the new key.
 
 ![Settings](screenshots/settings.png)
 
@@ -46,7 +46,7 @@ To update, install the new zip the same way and log in again.
 
 If T3 printed the link for 127.0.0.1, also enter the address the server has for you, such as `https://server.tailnet.ts.net`. An account signed in on several servers appears once.
 
-When a server stops answering, as it does for a minute or two while T3 updates or restarts, the menu keeps its last numbers. It reports the server, with the time of its last data, at the first check after it has gone 5 minutes without answering (about 6 minutes, time asleep included). A server that has never answered, and an error you need to act on, such as an expired sign-in or an unsupported T3 version, are reported at once.
+When a server stops answering, as it does for a minute or two while T3 updates or restarts, the menu keeps its last numbers. At the first check after 5 minutes without an answer (about 6 minutes, time asleep included), the menu says "T3 is off" for that server, or "not reachable" when the network does not reach it, and leaves out the accounts only that server runs. When no server answers, the top bar says "T3 off". A server that has never answered gets the same at once. An error you need to act on, such as an expired sign-in or an unsupported T3 version, is reported as a warning at once.
 
 ## Privacy
 
@@ -69,7 +69,7 @@ npm test          # needs gjs, the Soup 3 typelib and glib-compile-schemas
 scripts/pack.sh   # builds dist/t3-ai-usage@mawox.github.io.shell-extension.zip
 ```
 
-`tests/headless.sh OUTPUT_DIR` runs the extension in a headless GNOME Shell against `tests/mock-t3.js`, a stand-in T3 server with sample accounts, and saves a report and screenshots; `MONITOR=1728x420` in front of the command gives it a short screen, where the menu must scroll. It touches nothing outside a temporary directory. To test another GNOME version, run it in one of the containers in `tests/containers/` (Ubuntu 24.04, Debian 13, Fedora 43, Ubuntu 26.04):
+`tests/headless.sh OUTPUT_DIR` runs the extension in a headless GNOME Shell against `tests/mock-t3.js`, a stand-in T3 server with sample accounts, and saves a report and screenshots; `MONITOR=1728x420` in front of the command gives it a short screen, where the menu must scroll, and `MONITOR=840x700` or `800x700` a narrow one, where the top bar tightens. It also checks that settings saved under old account keys move to the new ones, and what the top bar and the menu say once T3 stops. It touches nothing outside a temporary directory. To test another GNOME version, run it in one of the containers in `tests/containers/` (Ubuntu 24.04, Debian 13, Fedora 43, Ubuntu 26.04):
 
 ```sh
 docker build -t t3-ai-usage-test:ubuntu-24.04 -f tests/containers/ubuntu-24.04.Dockerfile tests/containers
