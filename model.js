@@ -249,18 +249,29 @@ export function reconcileAccounts(known, accounts, servers, providers, today) {
         return enabled.get(id)?.get(instanceId);
     };
     const accountOf = instance => keyNow.get(instance) ?? instance;
+    const compatible = (k, instance) => {
+        const auth = providerAt(instance)?.auth;
+        return !differ(auth?.email, emailOf(k)) && !differ(auth?.workspaceId, workspaceOf(k));
+    };
     const holder = new Map();
+    // An entry under the very key a waiting provider will report is that account.
+    for (const instance of keyNow.keys()) {
+        const k = byKey.get(accountOf(instance));
+        if (waiting(instance) && k && !current.has(k.key))
+            holder.set(k.key, k);
+    }
     for (const k of [...absent].sort(latestFirst)) {
         for (const instance of k.instances) {
-            const auth = providerAt(instance)?.auth;
-            if (waiting(instance) && !holder.has(accountOf(instance)) &&
-                !differ(auth?.email, emailOf(k)) && !differ(auth?.workspaceId, workspaceOf(k)))
+            if (waiting(instance) && !holder.has(accountOf(instance)) && compatible(k, instance))
                 holder.set(accountOf(instance), k);
         }
     }
     // The provider may still bring this entry back.
     const keeps = (k, instance) => unanswered(instance) || (waiting(instance) && holder.get(accountOf(instance)) === k);
-    const alive = k => k.instances.some(instance => keeps(k, instance));
+    // The waiting providers of the account an entry keeps, of a login that does not differ.
+    const waitingFor = k => [...keyNow.keys()]
+        .filter(instance => waiting(instance) && holder.get(accountOf(instance)) === k && compatible(k, instance));
+    const alive = k => k.instances.some(instance => keeps(k, instance)) || waitingFor(k).length > 0;
 
     const inherited = new Map();
     const fresh = [];
@@ -307,7 +318,6 @@ export function reconcileAccounts(known, accounts, servers, providers, today) {
     };
     // An account kept without a report keeps only the providers that may still bring it back.
     // The entry kept for an account takes the providers of the others waiting on it.
-    const waitingFor = k => [...keyNow.keys()].filter(instance => waiting(instance) && holder.get(accountOf(instance)) === k);
     const retained = k => {
         const instances = [...new Set([...k.instances.filter(instance => keeps(k, instance)), ...waitingFor(k)])];
         const ids = new Set(instances.map(instance => splitInstance(instance)[0]));

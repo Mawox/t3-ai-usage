@@ -279,6 +279,11 @@ const noLimits = list => list.map(x => (x.instanceId === 'codex' ? {...x, usageL
 const bothWaiting = new Map([['local', noLimits(localProviders)], ['hub', noLimits(hubProviders)]]);
 equal(model.reconcileAccounts(otherLogin2, [], servers, bothWaiting, TODAY).known.map(k => k.key), ['codex:a@x:ws1'],
     'an entry of another login does not keep an account it waits on');
+const swapped = [{...legacy('codex:a@x:ws1', 'Codex', 'codex', ['This computer'], '2026-11-26'), instances: ['local|codex']}];
+const swappedProviders = new Map([['local', [{...p('codex', 'codex', 'Codex', 'b@x'), usageLimits: null}]],
+    ['hub', [{...p('codex', 'codex', 'Codex', 'a@x'), usageLimits: null}]]]);
+equal(model.reconcileAccounts(swapped, [], servers, swappedProviders, TODAY).known.map(k => [k.key, k.instances]),
+    [['codex:a@x:ws1', ['hub|codex']]], 'an entry stays with the provider that will report its own key');
 const twinsOffline = model.reconcileAccounts(oneLeft.known,
     model.collectAccounts([{env: servers[0], providers: [noEmail('agA', 'x'), noEmail('agB', 'y')]}]), servers,
     new Map([['local', [noEmail('agA', 'x'), noEmail('agB', 'y')]]]), TODAY);
