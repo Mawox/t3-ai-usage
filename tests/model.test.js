@@ -199,14 +199,14 @@ equal([switched.fresh.map(a => a.key), switched.known.map(k => k.key)], [['codex
     'another login in the same provider starts afresh');
 
 const twins = model.collectAccounts([{env: servers[0], providers: [noEmail('agA', 'x'), noEmail('agB', 'y')]}]);
-equal(twins.map(a => a.key), ['antigravity:instance:agA', 'antigravity:instance:agB'],
+equal(twins.map(a => a.key), ['antigravity:instance:agA:Antigravity', 'antigravity:instance:agB:Antigravity'],
     'two providers of one name on one server stay two accounts');
 const twinGone = model.reconcileAccounts(model.reconcileAccounts([], twins, servers,
     new Map([['local', [noEmail('agA', 'x'), noEmail('agB', 'y')]]]), TODAY).known,
 model.collectAccounts([{env: servers[0], providers: [noEmail('agB', 'y')]}]), servers,
 new Map([['local', [noEmail('agB', 'y')]]]), TODAY);
 equal([[...twinGone.inherited], twinGone.known.map(k => k.key)],
-    [[['antigravity:name:Antigravity', 'antigravity:instance:agB']], ['antigravity:name:Antigravity']],
+    [[['antigravity:name:Antigravity', 'antigravity:instance:agB:Antigravity']], ['antigravity:name:Antigravity']],
     'when one of them goes, the other keeps its own settings under the plain key');
 
 const renamed = model.reconcileAccounts(twinGone.known,
@@ -224,11 +224,15 @@ const fp = model.reconcileAccounts([legacy('antigravity:fp:bbbb', 'Antigravity',
     legacy('antigravity:fp:aaaa', 'Antigravity', 'antigravity', ['hub'], '2026-11-21')],
 model.collectAccounts([{env: servers[1], providers: [noEmail('agA', 'aaaa'), noEmail('agB', 'bbbb')]}]), servers,
 new Map([['hub', [noEmail('agA', 'aaaa'), noEmail('agB', 'bbbb')]]]), TODAY);
-equal([...fp.inherited], [['antigravity:instance:agA', 'antigravity:fp:aaaa'],
-    ['antigravity:instance:agB', 'antigravity:fp:bbbb']], 'old fingerprint keys find their own provider');
+equal([...fp.inherited], [['antigravity:instance:agA:Antigravity', 'antigravity:fp:aaaa'],
+    ['antigravity:instance:agB:Antigravity', 'antigravity:fp:bbbb']], 'old fingerprint keys find their own provider');
 const oldInstanceKey = model.reconcileAccounts([legacy('hub:gone', 'Antigravity', 'antigravity', ['hub'], '2026-11-20')],
     [], servers, answered2, TODAY);
 equal(oldInstanceKey.known, [], 'an old instance key does not pass to a provider of the same name');
+const twinServers = [{id: 'local', name: 'box'}, {id: 'hub', name: 'box'}];
+const ownServer = model.reconcileAccounts([legacy('local:gone', 'Antigravity', 'antigravity', ['box'], '2026-11-20')],
+    [], twinServers, new Map([['local', localProviders], ['hub', hubProviders]]), TODAY);
+equal(ownServer.known, [], 'an old instance key stays with its own server when two share a name');
 
 const unsupported = model.reconcileAccounts([legacy('opencode:name:OC', 'OC', 'opencode', ['This computer'], '2026-11-20')], [], servers,
     new Map([['local', [{instanceId: 'oc', driver: 'opencode', displayName: 'OC', enabled: true,
@@ -237,7 +241,7 @@ equal(unsupported.known, [], 'a provider T3 reports as unsupported does not keep
 
 const pending = {...noEmail('agA', 'x'), usageLimits: null};
 equal(model.collectAccounts([{env: servers[0], providers: [pending, noEmail('agB', 'y')]}]).map(a => a.key),
-    ['antigravity:instance:agB'], 'a second provider keeps its key while the first has no limits');
+    ['antigravity:instance:agB:Antigravity'], 'a second provider keeps its key while the first has no limits');
 
 const hubWaiting = new Map([['local', answered2.get('local')],
     ['hub', answered2.get('hub').map(x => (x.instanceId === 'codex' ? {...x, usageLimits: null} : x))]]);

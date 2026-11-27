@@ -79,7 +79,7 @@ export function collectAccounts(snapshots) {
         const plain = p => accountKey(p, p.displayName || p.instanceId);
         const keys = new Map(switchedOn.map(p => {
             const shared = !p.auth?.email && switchedOn.filter(x => !x.auth?.email && plain(x) === plain(p)).length > 1;
-            return [p.instanceId, shared ? `${p.driver}:instance:${p.instanceId}` : plain(p)];
+            return [p.instanceId, shared ? `${p.driver}:instance:${p.instanceId}:${p.displayName || p.instanceId}` : plain(p)];
         }));
         for (const p of providers ?? []) {
             const limits = p.usageLimits;
@@ -198,9 +198,11 @@ export function reconcileAccounts(known, accounts, servers, providers, today) {
     // with the same driver and name (and e-mail, when several match), found once the
     // server answers. A server name that several servers share stands for each.
     const resolve = k => {
+        // A key of the form `server id:instance id` belongs to that server only.
+        const owner = servers.find(s => k.key.startsWith(`${s.id}:`));
         const instances = Array.isArray(k.instances)
             ? k.instances
-            : (k.sources ?? []).flatMap(name => servers.filter(s => s.name === name)
+            : (k.sources ?? []).flatMap(name => servers.filter(s => s.name === name && (!owner || s === owner))
                 .map(s => instanceKey(s.id, UNKNOWN_INSTANCE)));
         return {
             ...k,

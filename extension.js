@@ -136,6 +136,7 @@ export default class T3AiUsageExtension extends Extension {
         this._createServers(keptStates);
         keptStates = null;
         this._shown = [];
+        this._rebuiltKnown = false;
         this._running = false;
 
         this._button = new PanelMenu.Button(0.0, this.metadata.name, false);
@@ -348,8 +349,11 @@ export default class T3AiUsageExtension extends Extension {
         const readable = Array.isArray(known);
         const complete = this._servers.every(server =>
             answered.includes(server) && this._states.get(server.id).providers?.length);
-        // A rebuilt list may still miss accounts T3 has no limits for yet.
-        const prunable = readable && complete;
+        // A rebuilt list may miss accounts T3 has no limits for yet: nothing is pruned
+        // for the rest of the session after a rebuild.
+        if (!readable)
+            this._rebuiltKnown = true;
+        const prunable = readable && complete && !this._rebuiltKnown;
         // A list that cannot be read is rebuilt from a poll in which every server
         // answered. That poll gives defaults only to accounts never ordered before.
         if (!readable && !complete)
